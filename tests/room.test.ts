@@ -118,6 +118,9 @@ describe("Worker et Durable Object de salle", () => {
     }, (message) => message.type === "snapshot" && message.snapshot?.phase === "drawing");
     expect(drawing.snapshot?.turn?.deadlineAt).toBeTruthy();
 
+    const cleared = await send(drawerSocket, { type: "clear", turnId }, (message) => message.type === "snapshot" && message.snapshot?.turn?.strokes.length === 0);
+    expect(cleared.snapshot?.turn?.strokes).toEqual([]);
+
     const otherTerminalWinner = await send(secondSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "error");
     expect(otherTerminalWinner).toMatchObject({ type: "error", message: "Ce téléphone n’est pas le terminal de dessin de ce tour." });
 

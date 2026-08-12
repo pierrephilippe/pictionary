@@ -1,5 +1,4 @@
-import { QRCodeSVG } from "qrcode.react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DIFFICULTIES,
   DURATIONS,
@@ -15,6 +14,11 @@ import {
   type Tool,
 } from "../domain/types";
 import type { ClientCommand, JoinRoomRequest } from "../shared/protocol";
+
+const RoomQrCode = lazy(async () => {
+  const module = await import("qrcode.react");
+  return { default: module.QRCodeSVG };
+});
 
 interface StoredSession {
   code: string;
@@ -32,6 +36,16 @@ type ServerMessage =
   | { type: "error"; message?: string };
 
 const ACTIVE_SESSION_KEY = "prisme.active-session";
+const STROKE_CHUNK_SIZE = 96;
+const CLEAR_CONFIRMATION_MS = 4_000;
+
+const haptic = (pattern: number | number[]): void => {
+  try {
+    navigator.vibrate?.(pattern);
+  } catch {
+    // Haptics are an optional enhancement and are unavailable on many browsers.
+  }
+};
 
 const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
   const response = await fetch(path, init);
@@ -98,7 +112,10 @@ function useRoomSocket(session: StoredSession | null) {
         socket.onmessage = (event) => {
           try {
             const message = JSON.parse(String(event.data)) as ServerMessage;
-            if (message.type === "snapshot") setSnapshot(message.snapshot);
+            if (message.type === "snapshot") {
+              setSnapshot(message.snapshot);
+              setConnectionError(null);
+            }
             if (message.type === "stroke_delta") {
               setSnapshot((previous) => mergeStrokeDelta(previous, message.round, message.stroke));
             }
@@ -142,15 +159,14 @@ function useRoomSocket(session: StoredSession | null) {
 
 const mergeStrokeDelta = (snapshot: RoomSnapshot | null, round: number, stroke: Stroke): RoomSnapshot | null => {
   if (!snapshot?.turn || snapshot.turn.round !== round) return snapshot;
-  const strokes = snapshot.turn.strokes.map((candidate) => ({ ...candidate, points: [...candidate.points] }));
-  const existing = strokes.find((candidate) => candidate.id === stroke.id);
-  if (existing) {
-    if (existing.complete) return snapshot;
-    existing.points.push(...stroke.points);
-    existing.complete ||= stroke.complete;
-  } else {
-    strokes.push({ ...stroke, points: [...stroke.points] });
-  }
+  const currentStrokes = snapshot.turn.strokes;
+  const strokeIndex = currentStrokes.findIndex((candidate) => candidate.id === stroke.id);
+  if (strokeIndex >= 0 && currentStrokes[strokeIndex]!.complete) return snapshot;
+  const strokes = strokeIndex >= 0
+    ? currentStrokes.map((candidate, index) => index === strokeIndex
+      ? { ...candidate, points: [...candidate.points, ...stroke.points], complete: candidate.complete || stroke.complete }
+      : candidate)
+    : [...currentStrokes, { ...stroke, points: [...stroke.points] }];
   return { ...snapshot, turn: { ...snapshot.turn, strokes } };
 };
 
@@ -159,7 +175,7 @@ const formatTime = (milliseconds: number): string => {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 };
 
-function Timer({ deadlineAt, serverNow, large = false }: { deadlineAt: number | null; serverNow: number; large?: boolean }) {
+function useRemainingTime(deadlineAt: number | null, serverNow: number): number | null {
   const [now, setNow] = useState(Date.now());
   const [serverOffset, setServerOffset] = useState(() => serverNow - Date.now());
   useEffect(() => {
@@ -168,10 +184,24 @@ function Timer({ deadlineAt, serverNow, large = false }: { deadlineAt: number | 
   }, [serverNow]);
   useEffect(() => {
     if (!deadlineAt) return undefined;
-    const timer = window.setInterval(() => setNow(Date.now()), 200);
+    // The display uses whole seconds. One update per second keeps four-view
+    // projection inexpensive without making the countdown feel less precise.
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [deadlineAt]);
-  return <span className={`timer${large ? " timer--large" : ""}`}>{deadlineAt ? formatTime(deadlineAt - (now + serverOffset)) : "--:--"}</span>;
+  return deadlineAt ? Math.max(0, deadlineAt - (now + serverOffset)) : null;
+}
+
+function Timer({ deadlineAt, serverNow, large = false }: { deadlineAt: number | null; serverNow: number; large?: boolean }) {
+  const remaining = useRemainingTime(deadlineAt, serverNow);
+  const urgent = remaining !== null && remaining <= 10_000;
+  return <span className={`timer${large ? " timer--large" : ""}${urgent ? " timer--urgent" : ""}`} aria-label={deadlineAt ? `Temps restant : ${formatTime(remaining ?? 0)}` : "Chronomètre en attente"}>{remaining === null ? "--:--" : formatTime(remaining)}</span>;
+}
+
+function PhaseCountdown({ deadlineAt, serverNow, label }: { deadlineAt: number; serverNow: number; label: string }) {
+  const remaining = useRemainingTime(deadlineAt, serverNow);
+  const urgent = remaining !== null && remaining <= 10_000;
+  return <div className={`phase-countdown${urgent ? " is-urgent" : ""}`} role="timer" aria-label={`${label} : ${formatTime(remaining ?? 0)}`}><span>{label}</span><strong>{formatTime(remaining ?? 0)}</strong></div>;
 }
 
 function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
@@ -185,6 +215,35 @@ function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; com
       ))}
     </ol>
   );
+}
+
+function RoundProgress({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
+  const currentRound = snapshot.turn?.round ?? 0;
+  const complete = snapshot.phase === "finished" ? snapshot.settings.rounds : Math.max(0, currentRound - 1);
+  return <ol className={`round-progress${compact ? " round-progress--compact" : ""}`} aria-label={`Progression : tour ${Math.min(currentRound || 1, snapshot.settings.rounds)} sur ${snapshot.settings.rounds}`}>
+    {Array.from({ length: snapshot.settings.rounds }, (_, index) => {
+      const round = index + 1;
+      const state = round <= complete ? "is-complete" : round === currentRound ? "is-current" : "";
+      return <li key={round} className={state}><span className="sr-only">Tour {round}{round <= complete ? " terminé" : round === currentRound ? " en cours" : " à venir"}</span></li>;
+    })}
+  </ol>;
+}
+
+function GameStatus({ snapshot }: { snapshot: RoomSnapshot }) {
+  const turn = snapshot.turn;
+  const countdown = snapshot.phase === "awaiting_ready" ? turn?.readyDeadlineAt ?? null : null;
+  const countdownLabel = snapshot.canDraw ? "Prêt dans" : "Relève dans";
+  const details = (() => {
+    switch (snapshot.phase) {
+      case "lobby": return { eyebrow: "Salle prête", title: "Ajoutez les joueurs, puis lancez la partie." };
+      case "awaiting_ready": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "C’est votre tour : préparez-vous à dessiner." : turn ? `${turn.drawerName} prend le crayon.` : "Choix du dessinateur…" };
+      case "armed": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: "Le mot est choisi. Le chrono démarre au premier trait." };
+      case "drawing": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "Dessinez : les autres joueurs devinent." : "À vous de deviner — le dessinateur arbitre." };
+      case "revealing": return { eyebrow: "Réponse", title: "Le mot et les points viennent d’être révélés." };
+      case "finished": return { eyebrow: "Résultat", title: "La partie est terminée." };
+    }
+  })();
+  return <section key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className={`game-status game-status--${snapshot.phase}`} aria-live="polite"><div><p className="eyebrow">{details.eyebrow}</p><strong>{details.title}</strong></div>{countdown ? <PhaseCountdown deadlineAt={countdown} serverNow={snapshot.serverNow} label={countdownLabel} /> : <RoundProgress snapshot={snapshot} compact />}</section>;
 }
 
 function drawStroke(
@@ -208,11 +267,39 @@ function drawStroke(
     context.fill();
   } else {
     context.moveTo(first.x * width, first.y * height);
-    for (const point of stroke.points.slice(1)) context.lineTo(point.x * width, point.y * height);
+    for (let index = 1; index < stroke.points.length; index += 1) {
+      const point = stroke.points[index]!;
+      context.lineTo(point.x * width, point.y * height);
+    }
     context.stroke();
   }
   context.restore();
 }
+
+interface PaintedStroke {
+  id: string;
+  tool: Tool;
+  width: number;
+  pointCount: number;
+  complete: boolean;
+}
+
+export const describeStrokes = (strokes: Stroke[]): PaintedStroke[] => strokes.map((stroke) => ({
+  id: stroke.id,
+  tool: stroke.tool,
+  width: stroke.width,
+  pointCount: stroke.points.length,
+  complete: stroke.complete,
+}));
+
+export const canAppendStrokes = (previous: PaintedStroke[], next: Stroke[]): boolean => previous.length <= next.length && previous.every((stroke, index) => {
+  const candidate = next[index];
+  return candidate?.id === stroke.id
+    && candidate.tool === stroke.tool
+    && candidate.width === stroke.width
+    && candidate.points.length >= stroke.pointCount
+    && (!stroke.complete || candidate.complete);
+});
 
 function DrawingCanvas({
   strokes,
@@ -222,6 +309,7 @@ function DrawingCanvas({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  ariaLabel,
 }: {
   strokes: Stroke[];
   draft?: Stroke | null;
@@ -230,37 +318,81 @@ function DrawingCanvas({
   onPointerDown?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
+  ariaLabel?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const paintedRef = useRef<PaintedStroke[]>([]);
+  const dimensionsRef = useRef({ width: 0, height: 0, scale: 0, inverse });
+  const contentsRef = useRef({ strokes, draft, inverse });
+  contentsRef.current = { strokes, draft, inverse };
+  const paint = useCallback((): void => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const scale = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelWidth = Math.max(1, Math.floor(bounds.width * scale));
+    const pixelHeight = Math.max(1, Math.floor(bounds.height * scale));
+    const contents = contentsRef.current;
+    const dimensions = dimensionsRef.current;
+    const resized = dimensions.width !== pixelWidth || dimensions.height !== pixelHeight || dimensions.scale !== scale;
+    const needsReset = resized || dimensions.inverse !== contents.inverse || !canAppendStrokes(paintedRef.current, contents.strokes);
+    if (resized) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    if (!committedCanvasRef.current) committedCanvasRef.current = document.createElement("canvas");
+    const committedCanvas = committedCanvasRef.current;
+    if (resized) {
+      committedCanvas.width = pixelWidth;
+      committedCanvas.height = pixelHeight;
+    }
+    const committedContext = committedCanvas.getContext("2d");
+    const context = canvas.getContext("2d");
+    if (!context || !committedContext) return;
+
+    if (needsReset) {
+      committedContext.setTransform(scale, 0, 0, scale, 0, 0);
+      committedContext.fillStyle = contents.inverse ? "#000000" : "#ffffff";
+      committedContext.fillRect(0, 0, bounds.width, bounds.height);
+      for (const stroke of contents.strokes) drawStroke(committedContext, stroke, contents.inverse, bounds.width, bounds.height);
+    } else {
+      for (let index = 0; index < contents.strokes.length; index += 1) {
+        const stroke = contents.strokes[index]!;
+        const previous = paintedRef.current[index];
+        if (!previous) {
+          drawStroke(committedContext, stroke, contents.inverse, bounds.width, bounds.height);
+          continue;
+        }
+        if (stroke.points.length > previous.pointCount) {
+          const start = Math.max(0, previous.pointCount - 1);
+          drawStroke(committedContext, { ...stroke, points: stroke.points.slice(start) }, contents.inverse, bounds.width, bounds.height);
+        }
+      }
+    }
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.drawImage(committedCanvas, 0, 0);
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    if (contents.draft) drawStroke(context, contents.draft, contents.inverse, bounds.width, bounds.height);
+    paintedRef.current = describeStrokes(contents.strokes);
+    dimensionsRef.current = { width: pixelWidth, height: pixelHeight, scale, inverse: contents.inverse };
+  }, []);
+  useEffect(() => {
+    paint();
+  }, [draft, inverse, paint, strokes]);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
-    const paint = (): void => {
-      const bounds = canvas.getBoundingClientRect();
-      const scale = Math.min(window.devicePixelRatio || 1, 2);
-      const pixelWidth = Math.max(1, Math.floor(bounds.width * scale));
-      const pixelHeight = Math.max(1, Math.floor(bounds.height * scale));
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-        canvas.width = pixelWidth;
-        canvas.height = pixelHeight;
-      }
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      context.setTransform(scale, 0, 0, scale, 0, 0);
-      context.fillStyle = inverse ? "#000000" : "#ffffff";
-      context.fillRect(0, 0, bounds.width, bounds.height);
-      for (const stroke of strokes) drawStroke(context, stroke, inverse, bounds.width, bounds.height);
-      if (draft) drawStroke(context, draft, inverse, bounds.width, bounds.height);
-    };
-    paint();
     const observer = new ResizeObserver(paint);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [draft, inverse, strokes]);
+  }, [paint]);
   return (
     <canvas
       ref={canvasRef}
       className={className}
+      aria-label={ariaLabel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -273,11 +405,41 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
   const [tool, setTool] = useState<Tool>("pen");
   const [width, setWidth] = useState(8);
   const [draft, setDraft] = useState<Stroke | null>(null);
+  const [clearConfirmation, setClearConfirmation] = useState(false);
   const activeRef = useRef<Stroke | null>(null);
   const pendingRef = useRef<Point[]>([]);
   const startedRef = useRef(false);
   const lastFlushRef = useRef(0);
+  const draftFrameRef = useRef<number | null>(null);
+  const clearTimerRef = useRef<number | null>(null);
   const turn = snapshot.turn;
+
+  const cancelClearConfirmation = (): void => {
+    if (clearTimerRef.current) window.clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = null;
+    setClearConfirmation(false);
+  };
+
+  useEffect(() => () => {
+    if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
+    if (clearTimerRef.current) window.clearTimeout(clearTimerRef.current);
+  }, []);
+  useEffect(() => {
+    activeRef.current = null;
+    pendingRef.current = [];
+    startedRef.current = false;
+    setDraft(null);
+    cancelClearConfirmation();
+  }, [turn?.id]);
+
+  const queueDraftPaint = (): void => {
+    if (draftFrameRef.current !== null) return;
+    draftFrameRef.current = window.requestAnimationFrame(() => {
+      draftFrameRef.current = null;
+      const active = activeRef.current;
+      setDraft(active ? { ...active, points: [...active.points] } : null);
+    });
+  };
 
   const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>): Point => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -290,8 +452,10 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
   const flush = (complete: boolean): void => {
     const active = activeRef.current;
     if (!active || !turn || pendingRef.current.length === 0) return;
-    const points = pendingRef.current.splice(0);
-    send({ type: "stroke", turnId: turn.id, stroke: { id: active.id, tool: active.tool, width: active.width, points, complete } });
+    while (pendingRef.current.length > 0) {
+      const points = pendingRef.current.splice(0, STROKE_CHUNK_SIZE);
+      send({ type: "stroke", turnId: turn.id, stroke: { id: active.id, tool: active.tool, width: active.width, points, complete: complete && pendingRef.current.length === 0 } });
+    }
     lastFlushRef.current = performance.now();
   };
 
@@ -304,56 +468,80 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     pendingRef.current = [];
     startedRef.current = false;
     lastFlushRef.current = performance.now();
-    setDraft(active);
+    setDraft({ ...active, points: [...active.points] });
   };
 
   const move = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     const active = activeRef.current;
     if (!active) return;
     const point = pointFromEvent(event);
-    active.points = [...active.points, point];
+    active.points.push(point);
     if (!startedRef.current) {
       const first = active.points[0]!;
       const hasMoved = Math.hypot(point.x - first.x, point.y - first.y) > 0.003;
       if (hasMoved) {
         startedRef.current = true;
         pendingRef.current = [...active.points];
+        haptic(8);
       }
     } else {
       pendingRef.current.push(point);
     }
-    setDraft({ ...active, points: [...active.points] });
+    queueDraftPaint();
     if (startedRef.current && performance.now() - lastFlushRef.current >= 80) flush(false);
   };
 
   const up = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (!activeRef.current) return;
-    if (startedRef.current && pendingRef.current.length === 0) {
-      pendingRef.current = [activeRef.current.points.at(-1)!];
+    const active = activeRef.current;
+    if (!active) return;
+    // A short tap is a legitimate drawing gesture: it creates a dot and, when
+    // it is the first gesture, starts the authoritative game timer as well.
+    if (!startedRef.current) {
+      startedRef.current = true;
+      pendingRef.current = [...active.points];
+      haptic(8);
+    } else if (pendingRef.current.length === 0) {
+      pendingRef.current = [active.points.at(-1)!];
     }
-    if (startedRef.current) flush(true);
+    flush(true);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     activeRef.current = null;
     pendingRef.current = [];
     startedRef.current = false;
+    if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
+    draftFrameRef.current = null;
     setDraft(null);
+  };
+
+  const clear = (): void => {
+    if (!turn || turn.strokes.length === 0) return;
+    if (clearConfirmation) {
+      send({ type: "clear", turnId: turn.id });
+      haptic([10, 25, 10]);
+      cancelClearConfirmation();
+      return;
+    }
+    setClearConfirmation(true);
+    clearTimerRef.current = window.setTimeout(() => setClearConfirmation(false), CLEAR_CONFIRMATION_MS);
   };
 
   return (
     <section className="drawing-board">
       <div className="drawing-tools" aria-label="Outils de dessin">
-        <button type="button" className={tool === "pen" ? "selected" : ""} onClick={() => setTool("pen")}>Crayon</button>
-        <button type="button" className={tool === "eraser" ? "selected" : ""} onClick={() => setTool("eraser")}>Gomme</button>
-        <label>Épaisseur <input aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /></label>
-        <button type="button" onClick={() => turn && send({ type: "undo", turnId: turn.id })}>Annuler</button>
+        <button type="button" className={tool === "pen" ? "selected" : ""} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
+        <button type="button" className={tool === "eraser" ? "selected" : ""} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
+        <label>Épaisseur <input name="stroke-width" aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width}px</output></label>
+        <button type="button" disabled={!turn?.strokes.length} onClick={() => turn && send({ type: "undo", turnId: turn.id })}>Annuler</button>
         <button type="button" onClick={() => turn && send({ type: "redo", turnId: turn.id })}>Rétablir</button>
-        <button type="button" onClick={() => turn && send({ type: "clear", turnId: turn.id })}>Tout effacer</button>
+        <button type="button" disabled={!turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
       </div>
+      <p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p>
       <DrawingCanvas
         strokes={turn?.strokes ?? []}
         draft={draft}
         inverse={false}
         className="drawing-canvas"
+        ariaLabel="Zone de dessin tactile"
         onPointerDown={down}
         onPointerMove={move}
         onPointerUp={up}
@@ -368,9 +556,9 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
   return (
     <main className="role-screen player-screen">
       <RoomHeader snapshot={snapshot} label="Terminal de dessin" />
-      <section className="terminal-mode-card"><div><strong>Affichage</strong><p>Ce téléphone peut aussi afficher la projection holographique.</p></div><button disabled={isDrawer} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal de dessin actif reste disponible jusqu’à la fin du tour.</small> : null}</section>
+      <GameStatus snapshot={snapshot} />
       {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
-      {snapshot.phase === "awaiting_ready" && snapshot.canTakeDrawingTurn && turn ? (
+      {snapshot.phase === "awaiting_ready" && !isDrawer && snapshot.canTakeDrawingTurn && turn ? (
         <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez son tour.</p><button className="button button--primary" onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && !isDrawer && !snapshot.canTakeDrawingTurn ? (
@@ -387,6 +575,7 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
       ) : null}
       {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <WinnerSelection snapshot={snapshot} send={send} /> : null}
       {snapshot.phase === "revealing" ? <Reveal snapshot={snapshot} /> : null}
+      <section className="terminal-mode-card"><div><strong>Ce terminal peut aussi projeter</strong><p>Activez le fond noir et les traits lumineux pour le plexiglas.</p></div><button disabled={isDrawer} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal du dessinateur reste disponible jusqu’à la fin du tour.</small> : null}</section>
       <Scoreboard snapshot={snapshot} />
     </main>
   );
@@ -395,7 +584,15 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
 function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const turn = snapshot.turn;
   if (!turn) return null;
-  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Le dessinateur valide la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}<button onClick={() => send({ type: "no_winner", turnId: turn.id })}>Personne n’a trouvé</button></div></section>;
+  const chooseWinner = (playerId: string): void => {
+    haptic([12, 35, 18]);
+    send({ type: "select_winner", turnId: turn.id, playerId });
+  };
+  const chooseNobody = (): void => {
+    haptic(10);
+    send({ type: "no_winner", turnId: turn.id });
+  };
+  return <section className="resolution"><p className="eyebrow">Fin du tour</p><h2>Qui a trouvé ?</h2><p>Validez la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} className="winner-button" onClick={() => chooseWinner(player.id)}>{player.name}<span>+1</span></button>)}<button className="no-winner-button" onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -412,9 +609,15 @@ function ToggleList<T extends string>({
 function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const [settings, setSettings] = useState<Settings>(snapshot.settings);
   const [playerName, setPlayerName] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   useEffect(() => {
     if (snapshot.phase === "lobby") setSettings(snapshot.settings);
   }, [snapshot.phase, snapshot.settings]);
+  useEffect(() => {
+    if (!copyFeedback) return undefined;
+    const timer = window.setTimeout(() => setCopyFeedback(null), 2_500);
+    return () => window.clearTimeout(timer);
+  }, [copyFeedback]);
   const toggle = <T extends string,>(key: "themes" | "difficulties", value: T): void => {
     setSettings((previous) => {
       const list = previous[key] as T[];
@@ -423,20 +626,30 @@ function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (c
     });
   };
   const joinUrl = `${window.location.origin}?join=${snapshot.code}`;
+  const copyJoinLink = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(joinUrl);
+      haptic(8);
+      setCopyFeedback("Lien copié !");
+    } catch {
+      setCopyFeedback("Copie indisponible : scannez le QR code ou saisissez le code.");
+    }
+  };
   return (
     <main className="role-screen controller-screen">
       <RoomHeader snapshot={snapshot} label="Préparation" />
+      <GameStatus snapshot={snapshot} />
       <section className="join-card">
-        <div><p className="eyebrow">Salle</p><h1>{snapshot.code}</h1><p>Scannez le QR code depuis les téléphones terminaux. Cet écran devient la projection au lancement.</p></div>
-        <QRCodeSVG value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin />
+        <div><p className="eyebrow">Salle</p><h1>{snapshot.code}</h1><p>Scannez le QR code depuis les téléphones terminaux. Cet écran devient la projection au lancement.</p><button className="link-button" type="button" onClick={() => void copyJoinLink()}>Copier le lien d’invitation</button>{copyFeedback ? <p className="copy-feedback" role="status">{copyFeedback}</p> : null}</div>
+        <Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense>
       </section>
       <section className="settings-card">
         <h2>Joueurs</h2>
-        <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; send({ type: "add_player", name: playerName }); setPlayerName(""); }}><label>Nom du joueur<input value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
+        <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; send({ type: "add_player", name: playerName }); setPlayerName(""); }}><label>Nom du joueur<input name="player-name" value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
         <Participants snapshot={snapshot} />
         <h2>Réglages de la partie</h2>
-        <label>Durée <select value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label>
-        <label>Nombre de tours <select value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} tours</option>)}</select></label>
+        <label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label>
+        <label>Nombre de tours <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} tours</option>)}</select></label>
         <h3>Thèmes</h3>
         <ToggleList values={THEMES} selected={settings.themes} toggle={(value) => toggle("themes", value)} label={(value) => ({ animaux: "Animaux", objets: "Objets", alimentation: "Alimentation", lieux: "Lieux", metiers: "Métiers" })[value]} />
         <h3>Difficulté</h3>
@@ -453,12 +666,30 @@ function Participants({ snapshot }: { snapshot: RoomSnapshot }) {
 
 function Reveal({ snapshot }: { snapshot: RoomSnapshot }) {
   const winner = snapshot.players.find((player) => player.id === snapshot.turn?.winnerId);
-  return <section className="reveal-card"><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? `${winner.name} a trouvé : +1 point pour lui et pour le dessinateur.` : "Personne n’a trouvé : le prochain dessinateur a été tiré au sort."}</p></section>;
+  return <section className={`reveal-card${winner ? " reveal-card--success" : ""}`} aria-live="assertive"><Celebration /><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? <><strong>Bravo {winner.name} !</strong> +1 point pour lui et pour le dessinateur.</> : "Personne n’a trouvé : le prochain dessinateur a été tiré au sort."}</p></section>;
 }
 
 function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
   const winners = snapshot.players.filter((player) => snapshot.finishedWinnerIds.includes(player.id));
-  return <section className="finished-card"><p className="eyebrow">Partie terminée</p><h1>{winners.map((player) => player.name).join(" et ")}</h1><p>{winners.length > 1 ? "sont ex æquo !" : "remporte la partie !"}</p><Scoreboard snapshot={snapshot} /></section>;
+  return <section className="finished-card" aria-live="assertive"><Celebration /><p className="eyebrow">Partie terminée</p><h1>{winners.map((player) => player.name).join(" et ")}</h1><p>{winners.length > 1 ? "sont ex æquo !" : "remporte la partie !"}</p><Scoreboard snapshot={snapshot} /></section>;
+}
+
+function Celebration() {
+  return <div className="celebration" aria-hidden="true"><span>✦</span><span>✧</span><span>✦</span><span>✧</span><span>✦</span></div>;
+}
+
+function ProjectionCue({ snapshot }: { snapshot: RoomSnapshot }) {
+  const turn = snapshot.turn;
+  const content = (() => {
+    if (snapshot.phase === "lobby") return { title: "Salle en préparation", detail: "Ajoutez les joueurs pour commencer." };
+    if (snapshot.phase === "awaiting_ready") return { title: "À vos crayons", detail: turn ? `${turn.drawerName} prend le relais.` : "Choix du dessinateur…", deadlineAt: turn?.readyDeadlineAt ?? null, deadlineLabel: "Relève" };
+    if (snapshot.phase === "armed") return { title: "Le mot est choisi", detail: "Le chronomètre commence au premier trait.", deadlineAt: turn?.armedDeadlineAt ?? null, deadlineLabel: "Commencez" };
+    if (snapshot.phase === "revealing") return { title: "La réponse était", detail: turn?.revealedWord ?? "" };
+    if (snapshot.phase === "finished") return { title: "Partie terminée", detail: "Score final affiché." };
+    return null;
+  })();
+  if (!content) return null;
+  return <div key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className="holo-cue"><strong>{content.title}</strong><span>{content.detail}</span>{content.deadlineAt && content.deadlineLabel ? <PhaseCountdown deadlineAt={content.deadlineAt} serverNow={snapshot.serverNow} label={content.deadlineLabel} /> : null}</div>;
 }
 
 function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSnapshot; onUseDrawingTerminal?: () => void }) {
@@ -534,17 +765,17 @@ function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSn
   };
   // In a V support, each half of the display reflects into a lateral face.
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
-  const copies = layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0];
+  const copies = useMemo(() => layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0], [layout]);
   return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}`}>
     <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
     <section className={`projection-stage projection-stage--${layout}`}>
       {copies.map((rotation, index) => <div key={rotation} className="projection-copy" style={{ "--rotation": `${rotation}deg` } as React.CSSProperties}>
-        {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
+        {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><ProjectionCue snapshot={snapshot} /><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" ariaLabel="Projection du dessin en cours" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
       </div>)}
     </section>
     <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p>
-    {presentationMode && layout === "vee" ? <p className="projection-orientation-notice">Pour le support V, tournez le téléphone à l’horizontale.</p> : null}
-    {presentationMode ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button onClick={() => void exitFullscreen()}>Quitter le plein écran</button></div> : null}
+    {layout === "vee" ? <p className="projection-orientation-notice">Pour le support V, tournez le téléphone à l’horizontale.</p> : null}
+    {presentationMode ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button aria-label="Passer en mode dessin" onClick={onUseDrawingTerminal}>Dessin</button> : null}<button aria-label="Ouvrir les réglages de projection" onClick={() => setSettingsOpen(true)}>Réglages</button><button aria-label="Quitter le plein écran" onClick={() => void exitFullscreen()}>Quitter</button></div> : null}
     {settingsOpen ? <ProjectionSettings snapshot={snapshot} layout={layout} calibration={calibration} onLayoutChange={changeLayout} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onClose={() => setSettingsOpen(false)} /> : null}
   </main>;
 }
@@ -554,7 +785,7 @@ function ProjectionSettings({ snapshot, layout, calibration, onLayoutChange, onC
   return <section className="projection-settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="projection-settings-title">
     <div className="projection-settings-panel">
       <div className="projection-settings-heading"><div><p className="eyebrow">Projection</p><h1 id="projection-settings-title">Réglages</h1></div><button className="projection-settings-close" aria-label="Fermer les réglages" onClick={onClose}>×</button></div>
-      <label>Support <select value={layout} onChange={(event) => onLayoutChange(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label>
+      <label>Support <select name="projection-layout" value={layout} onChange={(event) => onLayoutChange(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label>
       <p className="projection-orientation-help">{layout === "pyramid" ? "La pyramide utilise un carré : le mode portrait est privilégié." : "Ce support utilise le mode paysage afin d’occuper toute la hauteur de l’écran."}</p>
       <button onClick={() => onCalibrationChange(!calibration)}>{calibration ? "Voir le jeu" : "Afficher la mire"}</button>
       <section className="projection-game-summary" aria-label="Réglages de la partie">
@@ -596,7 +827,7 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
       onSession(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Connexion impossible."); } finally { setBusy(false); }
   };
-  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Créez la partie sur le téléphone qui servira de projection. Le téléphone principal inscrit les joueurs, tandis que les autres téléphones peuvent dessiner ou devenir des projecteurs.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie</button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><form onSubmit={join}><label>Code de salle<input value={code} placeholder="ABC123" maxLength={6} onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Ce téléphone peut être confié au dessinateur, ou passer en mode projecteur à tout moment.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre comme terminal"}</button></form>{error ? <p className="error-message">{error}</p> : null}</section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Un téléphone prépare la partie et projette. Les autres deviennent, au choix, un crayon ou un autre projecteur.</p><ol className="quick-start" aria-label="Démarrage en trois étapes"><li><span>1</span>Créez la salle</li><li><span>2</span>Ajoutez les joueurs</li><li><span>3</span>Faites apparaître le dessin</li></ol><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><h2>Un terminal suffit.</h2><form onSubmit={join}><label>Code de salle<input name="room-code" value={code} placeholder="ABC123" maxLength={6} autoCapitalize="characters" autoCorrect="off" onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Confiez-le au dessinateur ou passez en projection quand vous voulez.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre la salle"}</button></form>{error ? <p className="error-message" role="alert">{error}</p> : null}</section></main>;
 }
 
 export function App() {
@@ -606,5 +837,5 @@ export function App() {
   const leave = (): void => { saveSession(null); setSession(null); };
   if (!session) return <Home onSession={adoptSession} />;
   if (!snapshot) return <main className="loading"><span className="brand">PRISME</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main>;
-  return <><div className={`connection-banner${connected ? "" : " is-offline"}`}>{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
+  return <><div className={`connection-banner${connected ? "" : " is-offline"}`} role="status">{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{connected && connectionError ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
 }

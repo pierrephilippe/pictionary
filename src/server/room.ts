@@ -56,6 +56,10 @@ const secureRandom = (): number => crypto.getRandomValues(new Uint32Array(1))[0]
 
 export class GameRoom extends DurableObject {
   private state: RoomState | null = null;
+  // The hibernation API may deliver another socket event while a command is
+  // awaiting alarm persistence. Keep state mutation and its broadcast in the
+  // same order as the client frames so an old stroke can never follow `clear`.
+  private commandQueue: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -155,25 +159,32 @@ export class GameRoom extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string" || message.length > 24_000) {
-      this.sendError(ws, "Commande invalide.");
-      return;
-    }
-    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    if (!attachment) {
-      ws.close(1008, "Session missing");
-      return;
-    }
-    const session = this.getSession(attachment.sessionId);
-    try {
-      const command = clientCommandSchema.parse(JSON.parse(message));
-      const stroke = await this.applyCommand(session, command);
-      if (stroke) this.broadcastStroke(stroke);
-      else this.broadcast();
-    } catch (error) {
-      this.sendError(ws, asErrorMessage(error));
-    }
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const handleMessage = async (): Promise<void> => {
+      if (typeof message !== "string" || message.length > 24_000) {
+        this.sendError(ws, "Commande invalide.");
+        return;
+      }
+      const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+      if (!attachment) {
+        ws.close(1008, "Session missing");
+        return;
+      }
+      const session = this.getSession(attachment.sessionId);
+      try {
+        const command = clientCommandSchema.parse(JSON.parse(message));
+        const stroke = await this.applyCommand(session, command);
+        if (stroke) this.broadcastStroke(stroke);
+        else this.broadcast();
+      } catch (error) {
+        this.sendError(ws, asErrorMessage(error));
+      }
+    };
+    // Do not use blockConcurrencyWhile here: it is intended for startup only
+    // and would unnecessarily stall the whole room. This small in-memory queue
+    // is rebuilt after hibernation, when no command is in progress.
+    this.commandQueue = this.commandQueue.catch(() => undefined).then(handleMessage);
+    return this.commandQueue;
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
