@@ -368,6 +368,7 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
   return (
     <main className="role-screen player-screen">
       <RoomHeader snapshot={snapshot} label="Terminal de dessin" />
+      <section className="terminal-mode-card"><div><strong>Affichage</strong><p>Ce téléphone peut aussi afficher la projection holographique.</p></div><button disabled={isDrawer} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal de dessin actif reste disponible jusqu’à la fin du tour.</small> : null}</section>
       {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
       {snapshot.phase === "awaiting_ready" && snapshot.canTakeDrawingTurn && turn ? (
         <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez son tour.</p><button className="button button--primary" onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
@@ -460,12 +461,26 @@ function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
   return <section className="finished-card"><p className="eyebrow">Partie terminée</p><h1>{winners.map((player) => player.name).join(" et ")}</h1><p>{winners.length > 1 ? "sont ex æquo !" : "remporte la partie !"}</p><Scoreboard snapshot={snapshot} /></section>;
 }
 
-function ProjectionScreen({ snapshot }: { snapshot: RoomSnapshot }) {
+function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSnapshot; onUseDrawingTerminal?: () => void }) {
   const [layout, setLayout] = useState<ProjectionLayout>("pyramid");
   const [calibration, setCalibration] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [immersive, setImmersive] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const presentationMode = immersive || nativeFullscreen;
+  const preferredOrientation = (nextLayout: ProjectionLayout): "portrait" | "landscape" => nextLayout === "pyramid" ? "portrait" : "landscape";
+  const lockOrientation = async (nextLayout: ProjectionLayout): Promise<void> => {
+    try {
+      const orientation = screen.orientation as ScreenOrientation & { lock?: (orientation: string) => Promise<void> };
+      await orientation.lock?.(preferredOrientation(nextLayout));
+    } catch {
+      // iOS Safari and some browsers do not permit programmatic orientation locks.
+    }
+  };
+  const changeLayout = (nextLayout: ProjectionLayout): void => {
+    setLayout(nextLayout);
+    if (presentationMode) void lockOrientation(nextLayout);
+  };
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
     if ("wakeLock" in navigator) void (navigator as Navigator & { wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock.request("screen").then((lock) => { wakeLock = lock; }).catch(() => undefined);
@@ -500,12 +515,7 @@ function ProjectionScreen({ snapshot }: { snapshot: RoomSnapshot }) {
     } catch {
       // Keep the CSS presentation fallback active.
     }
-    try {
-      const orientation = screen.orientation as ScreenOrientation & { lock?: (orientation: string) => Promise<void> };
-      await orientation.lock?.("landscape");
-    } catch {
-      // Orientation locking is not available on several mobile browsers.
-    }
+    await lockOrientation(layout);
   };
   const exitFullscreen = async (): Promise<void> => {
     setImmersive(false);
@@ -516,20 +526,46 @@ function ProjectionScreen({ snapshot }: { snapshot: RoomSnapshot }) {
     } catch {
       // The fallback only changes local presentation styles.
     }
+    try {
+      screen.orientation?.unlock?.();
+    } catch {
+      // Orientation locks are optional and may not be exposed by the browser.
+    }
   };
   // In a V support, each half of the display reflects into a lateral face.
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
   const copies = layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0];
   return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}`}>
-    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls"><label>Support <select value={layout} onChange={(event) => setLayout(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label><button onClick={() => setCalibration((value) => !value)}>{calibration ? "Voir le jeu" : "Mire"}</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
+    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
     <section className={`projection-stage projection-stage--${layout}`}>
       {copies.map((rotation, index) => <div key={rotation} className="projection-copy" style={{ "--rotation": `${rotation}deg` } as React.CSSProperties}>
         {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
       </div>)}
     </section>
     <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p>
-    {presentationMode ? <button className="projection-exit" onClick={() => void exitFullscreen()}>Quitter le plein écran</button> : null}
+    {presentationMode && layout === "vee" ? <p className="projection-orientation-notice">Pour le support V, tournez le téléphone à l’horizontale.</p> : null}
+    {presentationMode ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button onClick={() => void exitFullscreen()}>Quitter le plein écran</button></div> : null}
+    {settingsOpen ? <ProjectionSettings snapshot={snapshot} layout={layout} calibration={calibration} onLayoutChange={changeLayout} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onClose={() => setSettingsOpen(false)} /> : null}
   </main>;
+}
+
+function ProjectionSettings({ snapshot, layout, calibration, onLayoutChange, onCalibrationChange, onUseDrawingTerminal, onClose }: { snapshot: RoomSnapshot; layout: ProjectionLayout; calibration: boolean; onLayoutChange: (layout: ProjectionLayout) => void; onCalibrationChange: (value: boolean) => void; onUseDrawingTerminal?: () => void; onClose: () => void }) {
+  const themes = snapshot.settings.themes.map((theme) => ({ animaux: "Animaux", objets: "Objets", alimentation: "Alimentation", lieux: "Lieux", metiers: "Métiers" })[theme]).join(", ");
+  return <section className="projection-settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="projection-settings-title">
+    <div className="projection-settings-panel">
+      <div className="projection-settings-heading"><div><p className="eyebrow">Projection</p><h1 id="projection-settings-title">Réglages</h1></div><button className="projection-settings-close" aria-label="Fermer les réglages" onClick={onClose}>×</button></div>
+      <label>Support <select value={layout} onChange={(event) => onLayoutChange(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label>
+      <p className="projection-orientation-help">{layout === "pyramid" ? "La pyramide utilise un carré : le mode portrait est privilégié." : "Ce support utilise le mode paysage afin d’occuper toute la hauteur de l’écran."}</p>
+      <button onClick={() => onCalibrationChange(!calibration)}>{calibration ? "Voir le jeu" : "Afficher la mire"}</button>
+      <section className="projection-game-summary" aria-label="Réglages de la partie">
+        <h2>Partie en cours</h2>
+        <dl><div><dt>Durée</dt><dd>{snapshot.settings.durationSeconds} secondes</dd></div><div><dt>Tours</dt><dd>{snapshot.settings.rounds}</dd></div><div><dt>Thèmes</dt><dd>{themes}</dd></div><div><dt>Difficulté</dt><dd>{snapshot.settings.difficulties.join(", ")}</dd></div></dl>
+        <p>Les règles sont verrouillées après le lancement afin de préserver le tour en cours.</p>
+      </section>
+      {onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Revenir au mode dessin</button> : null}
+      <button className="button button--primary" onClick={onClose}>Reprendre la projection</button>
+    </div>
+  </section>;
 }
 
 function CalibrationMark({ number }: { number: number }) {
@@ -560,7 +596,7 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
       onSession(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Connexion impossible."); } finally { setBusy(false); }
   };
-  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Créez la partie sur le téléphone qui servira de projection. Le téléphone principal inscrit les joueurs, tandis que les autres téléphones sont des terminaux de dessin.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie</button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><form onSubmit={join}><label>Code de salle<input value={code} placeholder="ABC123" maxLength={6} onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Ce téléphone pourra être confié au dessinateur désigné à chaque tour.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre comme terminal"}</button></form>{error ? <p className="error-message">{error}</p> : null}</section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Créez la partie sur le téléphone qui servira de projection. Le téléphone principal inscrit les joueurs, tandis que les autres téléphones peuvent dessiner ou devenir des projecteurs.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie</button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><form onSubmit={join}><label>Code de salle<input value={code} placeholder="ABC123" maxLength={6} onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Ce téléphone peut être confié au dessinateur, ou passer en mode projecteur à tout moment.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre comme terminal"}</button></form>{error ? <p className="error-message">{error}</p> : null}</section></main>;
 }
 
 export function App() {
@@ -570,5 +606,5 @@ export function App() {
   const leave = (): void => { saveSession(null); setSession(null); };
   if (!session) return <Home onSession={adoptSession} />;
   if (!snapshot) return <main className="loading"><span className="brand">PRISME</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main>;
-  return <><div className={`connection-banner${connected ? "" : " is-offline"}`}>{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
+  return <><div className={`connection-banner${connected ? "" : " is-offline"}`}>{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
 }

@@ -6,6 +6,7 @@ export const ROUND_COUNTS = [5, 10, 15] as const;
 export type Theme = (typeof THEMES)[number];
 export type Difficulty = (typeof DIFFICULTIES)[number];
 export type Role = "controller" | "terminal";
+export type TerminalDisplayMode = "drawing" | "projection";
 export type ProjectionLayout = "pyramid" | "vee" | "single";
 export type GamePhase = "lobby" | "awaiting_ready" | "armed" | "drawing" | "revealing" | "finished";
 export type Tool = "pen" | "eraser";
@@ -66,6 +67,7 @@ export interface Session {
   id: string;
   token: string;
   role: Role;
+  displayMode?: TerminalDisplayMode;
   createdAt: number;
   lastSeenAt: number;
 }
@@ -115,6 +117,7 @@ export interface RoomSnapshot {
   canDraw: boolean;
   canTakeDrawingTurn: boolean;
   canSelectWinner: boolean;
+  displayMode: TerminalDisplayMode;
   secretWord: string | null;
   finishedWinnerIds: string[];
   serverNow: number;

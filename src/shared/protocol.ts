@@ -27,6 +27,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("configure"), settings: settingsSchema }),
   z.object({ type: z.literal("add_player"), name: z.string().trim().min(2).max(24) }),
   z.object({ type: z.literal("start_game") }),
+  z.object({ type: z.literal("set_display_mode"), displayMode: z.enum(["drawing", "projection"]) }),
   z.object({ type: z.literal("take_drawing_turn") }).merge(turnCommand),
   z.object({ type: z.literal("ready") }).merge(turnCommand),
   z.object({ type: z.literal("stroke"), stroke: strokeSchema }).merge(turnCommand),

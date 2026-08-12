@@ -9,6 +9,7 @@ import {
   type Session,
   type Settings,
   type Stroke,
+  type TerminalDisplayMode,
   type Word,
 } from "./types";
 
@@ -46,6 +47,19 @@ export const getPlayer = (state: RoomState, playerId: string): Player => {
   if (!player) throw new GameRuleError("Joueur introuvable.");
   return player;
 };
+
+export const displayModeFor = (session: Session): TerminalDisplayMode => session.displayMode ?? (session.role === "terminal" ? "drawing" : "projection");
+
+export function setTerminalDisplayMode(state: RoomState, session: Session, displayMode: TerminalDisplayMode, now: number): void {
+  if (session.role !== "terminal") throw new GameRuleError("Réservé à un téléphone de dessin.");
+  const isActiveDrawer = state.current?.drawerTerminalSessionId === session.id
+    && ["awaiting_ready", "armed", "drawing"].includes(state.phase);
+  if (displayMode === "projection" && isActiveDrawer) {
+    throw new GameRuleError("Le terminal de dessin actif ne peut pas passer en mode projecteur.");
+  }
+  session.displayMode = displayMode;
+  state.updatedAt = now;
+}
 
 const availablePlayers = (state: RoomState, excludingId?: string): Player[] =>
   state.players.filter((player) => player.id !== excludingId);
@@ -350,6 +364,8 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
   const current = state.current;
   const drawer = current ? getPlayer(state, current.drawerId) : null;
   const revealed = state.phase === "revealing" || state.phase === "finished";
+  const displayMode = displayModeFor(session);
+  const canUseDrawingTerminal = session.role === "terminal" && displayMode === "drawing";
   return {
     code: state.code,
     phase: state.phase,
@@ -368,10 +384,11 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
       winnerId: current.winnerId,
       nextDrawerId: current.nextDrawerId,
     } : null,
-    canDraw: session.role === "terminal" && session.id === current?.drawerTerminalSessionId && ["awaiting_ready", "armed", "drawing"].includes(state.phase),
-    canTakeDrawingTurn: session.role === "terminal" && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),
-    canSelectWinner: session.role === "terminal" && session.id === current?.drawerTerminalSessionId && state.phase === "drawing",
-    secretWord: session.role === "terminal" && session.id === current?.drawerTerminalSessionId && ["armed", "drawing"].includes(state.phase)
+    canDraw: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["awaiting_ready", "armed", "drawing"].includes(state.phase),
+    canTakeDrawingTurn: canUseDrawingTerminal && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),
+    canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && state.phase === "drawing",
+    displayMode,
+    secretWord: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing"].includes(state.phase)
       ? current?.word?.label ?? null
       : null,
     finishedWinnerIds: structuredClone(state.finishedWinnerIds),

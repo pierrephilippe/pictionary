@@ -44,7 +44,7 @@ h2 { font-size: 1.25rem; }
 .status-dot { color: #88f6ba; font-size: .72rem; font-weight: 800; }
 .status-dot::before { content: ""; display: inline-block; width: .48rem; height: .48rem; margin-right: .35rem; border-radius: 50%; background: currentColor; }
 
-.join-card, .settings-card, .status-card, .control-turn, .participants, .reveal-card, .finished-card { margin-bottom: 1rem; border: 1px solid #303451; border-radius: 1.2rem; padding: clamp(1.2rem, 4vw, 2rem); background: linear-gradient(145deg, #1a1d34, #121426); }
+.join-card, .settings-card, .status-card, .control-turn, .participants, .reveal-card, .finished-card, .terminal-mode-card { margin-bottom: 1rem; border: 1px solid #303451; border-radius: 1.2rem; padding: clamp(1.2rem, 4vw, 2rem); background: linear-gradient(145deg, #1a1d34, #121426); }
 .join-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .join-card h1 { margin-bottom: .4rem; font-family: ui-monospace, monospace; font-size: clamp(2.3rem, 10vw, 5rem); letter-spacing: .09em; }
 .join-card p { max-width: 31rem; margin-bottom: 0; color: #b9b8cf; line-height: 1.55; }
@@ -55,6 +55,9 @@ h2 { font-size: 1.25rem; }
 .toggle-list { display: flex; flex-wrap: wrap; gap: .45rem; }
 .toggle-list button { color: #c6c5dc; background: #272a42; }
 .participants .scoreboard { margin-bottom: 0; }
+.terminal-mode-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .8rem; }
+.terminal-mode-card p { margin: .3rem 0 0; color: #b9b8cf; font-size: .86rem; }
+.terminal-mode-card small { width: 100%; color: #aaa9c1; font-size: .76rem; }
 
 .status-card { text-align: center; padding-block: clamp(2rem, 8vw, 5rem); }
 .status-card h1 { margin-bottom: 1rem; }
@@ -115,9 +118,41 @@ h2 { font-size: 1.25rem; }
 .projection-screen--immersive .projection-stage { width: min(100vw, 100dvh, 1100px); }
 .projection-screen--immersive .projection-stage--vee { width: min(100vw, 200dvh, 1100px); }
 .projection-screen--immersive .projection-stage--single { width: min(100vw, 177.78dvh, 900px); }
-.projection-exit { position: fixed; right: .75rem; bottom: .75rem; z-index: 11; padding: .45rem .65rem; color: #d7d2e6; background: #161827bb; font-size: .68rem; opacity: .3; }
-.projection-exit:focus-visible, .projection-exit:hover { opacity: 1; }
+.projection-presentation-actions { position: fixed; right: .75rem; bottom: .75rem; z-index: 11; display: flex; gap: .4rem; opacity: .32; transition: opacity .16s ease; }
+.projection-presentation-actions:focus-within, .projection-presentation-actions:hover { opacity: 1; }
+.projection-presentation-actions button { padding: .45rem .65rem; color: #d7d2e6; background: #161827bb; font-size: .68rem; }
+.projection-orientation-notice { display: none; }
+.projection-settings-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 1rem; background: #05050aec; overscroll-behavior: contain; }
+.projection-settings-panel { display: grid; width: min(100%, 32rem); max-height: min(92dvh, 46rem); gap: 1rem; overflow-y: auto; border: 1px solid #484d78; border-radius: 1.2rem; padding: clamp(1.1rem, 4vw, 1.7rem); color: #eeebfa; background: linear-gradient(145deg, #202440, #111426); box-shadow: 0 1.4rem 4rem #0009; }
+.projection-settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.projection-settings-heading .eyebrow { margin-bottom: .3rem; }
+.projection-settings-heading h1 { margin: 0; font-size: clamp(1.9rem, 8vw, 3rem); }
+.projection-settings-close { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; padding: 0; border-radius: 50%; color: #d7d2e6; font-size: 1.5rem; line-height: 1; }
+.projection-orientation-help { margin: -.45rem 0 0; color: #c1c1d6; font-size: .86rem; line-height: 1.45; }
+.projection-game-summary { display: grid; gap: .65rem; padding: 1rem; border-radius: .9rem; background: #15192d; }
+.projection-game-summary h2, .projection-game-summary p { margin: 0; }
+.projection-game-summary h2 { font-size: 1rem; }
+.projection-game-summary dl { display: grid; gap: .5rem; margin: 0; }
+.projection-game-summary dl > div { display: flex; justify-content: space-between; gap: 1rem; }
+.projection-game-summary dt { color: #aaaac4; }
+.projection-game-summary dd { margin: 0; color: #f0edff; text-align: right; }
+.projection-game-summary p { color: #aeadc4; font-size: .78rem; line-height: 1.4; }
 .projection-immersive .connection-banner, .projection-immersive .leave-button { display: none; }
+
+@media (orientation: portrait) {
+  .projection-screen--immersive .projection-orientation-notice { position: fixed; right: 1rem; bottom: 3.6rem; left: 1rem; z-index: 10; display: block; margin: 0; padding: .55rem .8rem; border: 1px solid #7c639e; border-radius: .7rem; color: #f3ebff; background: #171128e8; text-align: center; font-size: .75rem; font-weight: 700; }
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .projection-settings-panel { width: min(95vw, 42rem); max-height: 94dvh; gap: .55rem; padding: .8rem 1rem; }
+  .projection-settings-heading h1 { font-size: 2rem; }
+  .projection-settings-heading .eyebrow { font-size: .66rem; }
+  .projection-orientation-help { font-size: .78rem; }
+  .projection-game-summary { gap: .4rem; padding: .65rem; }
+  .projection-game-summary dl { grid-template-columns: 1fr 1fr; column-gap: 1rem; }
+  .projection-game-summary dl > div { gap: .5rem; font-size: .78rem; }
+  .projection-game-summary p { display: none; }
+}
 
 .connection-banner { position: fixed; top: 0; right: 0; z-index: 10; padding: .35rem .65rem; border-radius: 0 0 0 .6rem; color: #14221a; background: #9cf4bd; font-size: .7rem; font-weight: 800; }
 .connection-banner.is-offline { color: #421925; background: #ffbdcc; }
@@ -132,6 +167,7 @@ h2 { font-size: 1.25rem; }
   .join-panel { padding: 2rem 1.5rem 3rem; }
   .join-card { align-items: flex-start; }
   .join-card svg { width: 96px; height: 96px; }
+  .terminal-mode-card button { width: 100%; }
   .projection-header { align-items: flex-start; flex-direction: column; }
   .projection-controls { width: 100%; justify-content: flex-start; }
   .projection-controls label { width: 100%; }

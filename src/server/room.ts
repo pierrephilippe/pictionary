@@ -15,6 +15,7 @@ import {
   ready,
   redo,
   selectWinner,
+  setTerminalDisplayMode,
   snapshotFor,
   startGame,
   takeDrawingTurn,
@@ -76,6 +77,7 @@ export class GameRoom extends DurableObject {
       id: randomId(),
       token: input.controllerToken,
       role: "controller",
+      displayMode: "projection",
       createdAt: now,
       lastSeenAt: now,
     };
@@ -101,6 +103,7 @@ export class GameRoom extends DurableObject {
       id: randomId(),
       token,
       role: input.role,
+      displayMode: "drawing",
       createdAt: now,
       lastSeenAt: now,
     };
@@ -222,6 +225,7 @@ export class GameRoom extends DurableObject {
     };
     const requireTerminal = (): string => {
       if (session.role !== "terminal") throw new GameRuleError("Réservé à un téléphone de dessin.");
+      if (session.displayMode === "projection") throw new GameRuleError("Ce téléphone est en mode projecteur.");
       return session.id;
     };
     const requireCurrentTurn = (turnId: string): void => {
@@ -242,6 +246,9 @@ export class GameRoom extends DurableObject {
       case "start_game":
         requireController();
         startGame(state, now, secureRandom);
+        break;
+      case "set_display_mode":
+        setTerminalDisplayMode(state, session, command.displayMode, now);
         break;
       case "take_drawing_turn":
         requireCurrentTurn(command.turnId);
@@ -367,6 +374,7 @@ export class GameRoom extends DurableObject {
       if (legacySession.role === "player") legacySession.role = "terminal";
       delete legacySession.playerId;
       legacySession.lastSeenAt ??= legacySession.createdAt;
+      legacySession.displayMode ??= legacySession.role === "terminal" ? "drawing" : "projection";
     }
     if (state.current) {
       state.current.id ??= `legacy-turn-${state.current.round}`;

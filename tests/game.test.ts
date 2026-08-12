@@ -13,11 +13,13 @@ import {
   redo,
   ready,
   selectWinner,
+  setTerminalDisplayMode,
   snapshotFor,
   startGame,
   takeDrawingTurn,
   undo,
 } from "../src/domain/game";
+import { CATALOGUE, CATALOGUE_SIZE } from "../src/domain/catalogue";
 import type { Player, Session } from "../src/domain/types";
 
 const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0, lastSeenAt: 0 };
@@ -35,6 +37,16 @@ function startedRoom() {
 }
 
 describe("moteur de jeu", () => {
+  it("propose plus de trois mille cartes, dans chaque thème et difficulté", () => {
+    expect(CATALOGUE_SIZE).toBeGreaterThanOrEqual(3_000);
+    expect(new Set(CATALOGUE.map((word) => word.id)).size).toBe(CATALOGUE_SIZE);
+    for (const theme of ["animaux", "objets", "alimentation", "lieux", "metiers"] as const) {
+      for (const difficulty of ["facile", "moyen", "difficile"] as const) {
+        expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === difficulty)).not.toHaveLength(0);
+      }
+    }
+  });
+
   it("autorise une partie à un seul joueur et le même joueur au tour suivant", () => {
     const state = createRoomState("SOLO01", controller, 0);
     addPlayer(state, player("player-1", "Lila"), 1);
@@ -149,6 +161,22 @@ describe("moteur de jeu", () => {
     expect(snapshotFor(state, drawerSession, 4).secretWord).toBeTruthy();
     expect(snapshotFor(state, otherSession, 4).secretWord).toBeNull();
     expect(snapshotFor(state, controllerSession, 4).secretWord).toBeNull();
+  });
+
+  it("permet à un terminal libre de devenir projecteur sans lui donner le mot secret", () => {
+    const state = startedRoom();
+    ready(state, terminal.id, 3, deterministic);
+    const otherTerminal: Session = { id: "projector-terminal", token: "token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
+
+    setTerminalDisplayMode(state, otherTerminal, "projection", 4);
+    const projection = snapshotFor(state, otherTerminal, 4);
+    expect(projection.displayMode).toBe("projection");
+    expect(projection.secretWord).toBeNull();
+    expect(projection.canTakeDrawingTurn).toBe(false);
+
+    expect(() => setTerminalDisplayMode(state, terminal, "projection", 4)).toThrow("Le terminal de dessin actif ne peut pas passer en mode projecteur.");
+    setTerminalDisplayMode(state, otherTerminal, "drawing", 5);
+    expect(snapshotFor(state, otherTerminal, 5).displayMode).toBe("drawing");
   });
 
   it("refuse une seconde validation du dessinateur et ne double jamais les points", () => {

@@ -161,4 +161,61 @@ describe("Worker et Durable Object de salle", () => {
     expect(rejected.status).toBe(429);
     await expect(json<{ error: string }>(rejected)).resolves.toEqual({ error: "La limite de téléphones terminaux est atteinte." });
   });
+
+  it("autorise un terminal libre à passer de la projection au dessin", async () => {
+    const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const joined = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const terminal = await json<SessionResponse>(joined);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+    const terminalSocket = await openSocket(controller.code, terminal.token);
+
+    await send(controllerSocket, { type: "add_player", name: "Lila" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 1);
+    const started = await send(controllerSocket, { type: "start_game" }, (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready");
+    const turnId = started.snapshot?.turn?.id;
+    if (!turnId) throw new Error("Tour absent.");
+
+    const projection = await send(terminalSocket, { type: "set_display_mode", displayMode: "projection" }, (message) => message.type === "snapshot" && message.snapshot?.displayMode === "projection");
+    expect(projection.snapshot?.displayMode).toBe("projection");
+    expect(projection.snapshot?.secretWord).toBeNull();
+
+    const rejected = await send(terminalSocket, { type: "take_drawing_turn", turnId }, (message) => message.type === "error");
+    expect(rejected).toMatchObject({ type: "error", message: "Ce téléphone est en mode projecteur." });
+
+    const drawing = await send(terminalSocket, { type: "set_display_mode", displayMode: "drawing" }, (message) => message.type === "snapshot" && message.snapshot?.displayMode === "drawing");
+    expect(drawing.snapshot?.canTakeDrawingTurn).toBe(true);
+    controllerSocket.close();
+    terminalSocket.close();
+  });
+
+  it("borne les WebSockets actifs d’une salle", async () => {
+    const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const sockets: WebSocket[] = [];
+    for (let index = 0; index < 20; index += 1) sockets.push(await openSocket(controller.code, controller.token));
+
+    const ticketResponse = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/ticket`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${controller.token}` },
+    });
+    const { ticket } = await json<{ ticket: string }>(ticketResponse);
+    const rejected = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/socket?ticket=${ticket}`, {
+      headers: { Upgrade: "websocket" },
+    });
+    expect(rejected.status).toBe(429);
+
+    for (const socket of sockets) socket.close();
+  });
 });
