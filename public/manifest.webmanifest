@@ -1,0 +1,9 @@
+{
+  "name": "Prisme — Pictionary holographique",
+  "short_name": "Prisme",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0c18",
+  "theme_color": "#0a0c18",
+  "lang": "fr"
+}
