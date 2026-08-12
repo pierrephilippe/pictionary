@@ -42,6 +42,13 @@
     },
     "production": {
       "name": "pictionary-hologram",
+      "routes": [
+        {
+          "pattern": "pictionary.fady.eu",
+          "custom_domain": true
+        }
+      ],
+      "workers_dev": false,
       "durable_objects": {
         "bindings": [
           {
