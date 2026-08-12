@@ -35,7 +35,22 @@ type ServerMessage =
   | { type: "stroke_delta"; round: number; stroke: Stroke }
   | { type: "error"; message?: string };
 
-const ACTIVE_SESSION_KEY = "prisme.active-session";
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
+interface PwaControls {
+  canInstall: boolean;
+  isInstalled: boolean;
+  isAppleMobile: boolean;
+  updateAvailable: boolean;
+  install: () => Promise<void>;
+  applyUpdate: () => void;
+}
+
+const ACTIVE_SESSION_KEY = "pictiofady.active-session";
+const LEGACY_SESSION_KEY = "prisme.active-session";
 const STROKE_CHUNK_SIZE = 96;
 const CLEAR_CONFIRMATION_MS = 4_000;
 
@@ -57,16 +72,21 @@ const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => 
 const saveSession = (session: StoredSession | null): void => {
   if (!session) {
     localStorage.removeItem(ACTIVE_SESSION_KEY);
+    localStorage.removeItem(LEGACY_SESSION_KEY);
     return;
   }
   localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
+  localStorage.removeItem(LEGACY_SESSION_KEY);
 };
 
 const loadSession = (): StoredSession | null => {
   try {
-    const value = localStorage.getItem(ACTIVE_SESSION_KEY);
+    const value = localStorage.getItem(ACTIVE_SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
     const session = value ? JSON.parse(value) as StoredSession : null;
-    return session?.role === "controller" || session?.role === "terminal" ? session : null;
+    const isValidRole = session?.role === "controller" || session?.role === "terminal";
+    const isValidCode = typeof session?.code === "string" && /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(session.code);
+    const isValidToken = typeof session?.token === "string" && /^[A-Za-z0-9_-]{32,64}$/.test(session.token);
+    return isValidRole && isValidCode && isValidToken ? session : null;
   } catch {
     return null;
   }
@@ -81,9 +101,75 @@ const socketUrl = (code: string, ticket: string): string => {
   return url.toString();
 };
 
+function usePwaLifecycle(): PwaControls {
+  const deferredInstallRef = useRef<BeforeInstallPromptEvent | null>(null);
+  const [canInstall, setCanInstall] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
+  const isInstalled = window.matchMedia?.("(display-mode: standalone)").matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+
+  useEffect(() => {
+    const receiveInstallPrompt = (event: Event): void => {
+      event.preventDefault();
+      deferredInstallRef.current = event as BeforeInstallPromptEvent;
+      setCanInstall(true);
+    };
+    const installed = (): void => {
+      deferredInstallRef.current = null;
+      setCanInstall(false);
+    };
+    window.addEventListener("beforeinstallprompt", receiveInstallPrompt);
+    window.addEventListener("appinstalled", installed);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", receiveInstallPrompt);
+      window.removeEventListener("appinstalled", installed);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return undefined;
+    let disposed = false;
+    const watchRegistration = (registration: ServiceWorkerRegistration): void => {
+      if (registration.waiting) setUpdateAvailable(true);
+      registration.addEventListener("updatefound", () => {
+        const worker = registration.installing;
+        worker?.addEventListener("statechange", () => {
+          if (!disposed && worker.state === "installed" && navigator.serviceWorker.controller) setUpdateAvailable(true);
+        });
+      });
+    };
+    void navigator.serviceWorker.ready.then((registration) => {
+      if (!disposed) watchRegistration(registration);
+    });
+    return () => { disposed = true; };
+  }, []);
+
+  const install = async (): Promise<void> => {
+    const event = deferredInstallRef.current;
+    if (!event) return;
+    await event.prompt();
+    await event.userChoice;
+    deferredInstallRef.current = null;
+    setCanInstall(false);
+  };
+
+  const applyUpdate = (): void => {
+    if (!("serviceWorker" in navigator)) return;
+    const reload = (): void => window.location.reload();
+    navigator.serviceWorker.addEventListener("controllerchange", reload, { once: true });
+    void navigator.serviceWorker.getRegistration().then((registration) => {
+      if (registration?.waiting) registration.waiting.postMessage({ type: "SKIP_WAITING" });
+    });
+  };
+
+  return { canInstall, isInstalled, isAppleMobile, updateAvailable, install, applyUpdate };
+}
+
 function useRoomSocket(session: StoredSession | null) {
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -94,9 +180,37 @@ function useRoomSocket(session: StoredSession | null) {
     setConnected(false);
     if (!session) return undefined;
     let disposed = false;
+    let connecting = false;
     let socket: WebSocket | null = null;
 
+    const stopReconnectTimer = (): void => {
+      if (reconnectRef.current === null) return;
+      window.clearTimeout(reconnectRef.current);
+      reconnectRef.current = null;
+    };
+
+    const scheduleReconnect = (immediately = false): void => {
+      if (disposed || reconnectRef.current !== null) return;
+      if (!navigator.onLine) {
+        setConnectionError("Connexion Internet indisponible. La partie reprendra dès le retour du réseau.");
+        return;
+      }
+      const attempt = reconnectAttemptRef.current;
+      const delay = immediately ? 0 : Math.min(8_000, 500 * 2 ** attempt) + Math.round(Math.random() * 250);
+      reconnectAttemptRef.current = Math.min(attempt + 1, 5);
+      reconnectRef.current = window.setTimeout(() => {
+        reconnectRef.current = null;
+        void connect();
+      }, delay);
+    };
+
     const connect = async (): Promise<void> => {
+      if (disposed || connecting || socketRef.current?.readyState === WebSocket.OPEN) return;
+      if (!navigator.onLine) {
+        setConnectionError("Connexion Internet indisponible. La partie reprendra dès le retour du réseau.");
+        return;
+      }
+      connecting = true;
       try {
         const ticket = await request<{ ticket: string }>(`/api/rooms/${session.code}/ticket`, {
           method: "POST",
@@ -106,10 +220,13 @@ function useRoomSocket(session: StoredSession | null) {
         socket = new WebSocket(socketUrl(session.code, ticket.ticket));
         socketRef.current = socket;
         socket.onopen = () => {
+          if (socketRef.current !== socket) return;
+          reconnectAttemptRef.current = 0;
           setConnected(true);
           setConnectionError(null);
         };
         socket.onmessage = (event) => {
+          if (socketRef.current !== socket) return;
           try {
             const message = JSON.parse(String(event.data)) as ServerMessage;
             if (message.type === "snapshot") {
@@ -125,22 +242,39 @@ function useRoomSocket(session: StoredSession | null) {
           }
         };
         socket.onclose = () => {
+          if (socketRef.current !== socket) return;
+          socketRef.current = null;
           setConnected(false);
-          if (!disposed) reconnectRef.current = window.setTimeout(() => void connect(), 1_000);
+          if (!disposed) scheduleReconnect();
         };
         socket.onerror = () => setConnectionError("La connexion temps réel a rencontré un problème.");
       } catch (error) {
         if (!disposed) {
           setConnected(false);
-          setConnectionError(error instanceof Error ? error.message : "Connexion impossible.");
-          reconnectRef.current = window.setTimeout(() => void connect(), 1_500);
+          const message = error instanceof Error ? error.message : "Connexion impossible.";
+          setConnectionError(message);
+          if (message === "Cette salle n’existe plus." || message === "Session invalide.") return;
+          scheduleReconnect();
         }
+      } finally {
+        connecting = false;
       }
     };
+    const reconnectNow = (): void => {
+      stopReconnectTimer();
+      void connect();
+    };
+    const recoverWhenVisible = (): void => {
+      if (document.visibilityState === "visible" && socketRef.current?.readyState !== WebSocket.OPEN) reconnectNow();
+    };
+    window.addEventListener("online", reconnectNow);
+    document.addEventListener("visibilitychange", recoverWhenVisible);
     void connect();
     return () => {
       disposed = true;
-      if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
+      window.removeEventListener("online", reconnectNow);
+      document.removeEventListener("visibilitychange", recoverWhenVisible);
+      stopReconnectTimer();
       socket?.close();
       socketRef.current = null;
     };
@@ -441,12 +575,20 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     });
   };
 
-  const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>): Point => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const pointFromCoordinates = (target: HTMLCanvasElement, clientX: number, clientY: number): Point => {
+    const rect = target.getBoundingClientRect();
     return {
-      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
-      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+      x: Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
     };
+  };
+
+  const appendPoint = (active: Stroke, point: Point): void => {
+    const previous = active.points.at(-1)!;
+    // Keeping only visually distinct samples reduces message volume on high-Hz
+    // touch screens without making fine curves feel polygonal.
+    if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0012) return;
+    active.points.push(point);
   };
 
   const flush = (complete: boolean): void => {
@@ -461,9 +603,17 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
 
   const down = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     if (!snapshot.canDraw || !turn) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const point = pointFromEvent(event);
-    const active: Stroke = { id: crypto.randomUUID(), tool, width, points: [point], complete: false };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Some embedded browsers expose Pointer Events without pointer capture.
+    }
+    const point = pointFromCoordinates(event.currentTarget, event.clientX, event.clientY);
+    const pressure = event.pointerType === "pen" && event.pressure > 0 ? event.pressure : 0.5;
+    const pressureWidth = tool === "pen" && event.pointerType === "pen"
+      ? Math.max(2, Math.min(28, Math.round(width * (0.55 + pressure * 0.9))))
+      : width;
+    const active: Stroke = { id: crypto.randomUUID(), tool, width: pressureWidth, points: [point], complete: false };
     activeRef.current = active;
     pendingRef.current = [];
     startedRef.current = false;
@@ -474,11 +624,13 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
   const move = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     const active = activeRef.current;
     if (!active) return;
-    const point = pointFromEvent(event);
-    active.points.push(point);
+    const target = event.currentTarget;
+    const samples = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
+    for (const sample of samples) appendPoint(active, pointFromCoordinates(target, sample.clientX, sample.clientY));
+    const point = active.points.at(-1)!;
     if (!startedRef.current) {
       const first = active.points[0]!;
-      const hasMoved = Math.hypot(point.x - first.x, point.y - first.y) > 0.003;
+        const hasMoved = Math.hypot(point.x - first.x, point.y - first.y) > 0.003;
       if (hasMoved) {
         startedRef.current = true;
         pendingRef.current = [...active.points];
@@ -504,7 +656,11 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
       pendingRef.current = [active.points.at(-1)!];
     }
     flush(true);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Releasing capture is optional when the browser never granted it.
+    }
     activeRef.current = null;
     pendingRef.current = [];
     startedRef.current = false;
@@ -522,7 +678,10 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
       return;
     }
     setClearConfirmation(true);
-    clearTimerRef.current = window.setTimeout(() => setClearConfirmation(false), CLEAR_CONFIRMATION_MS);
+    clearTimerRef.current = window.setTimeout(() => {
+      clearTimerRef.current = null;
+      setClearConfirmation(false);
+    }, CLEAR_CONFIRMATION_MS);
   };
 
   return (
@@ -531,8 +690,8 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
         <button type="button" className={tool === "pen" ? "selected" : ""} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
         <button type="button" className={tool === "eraser" ? "selected" : ""} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
         <label>Épaisseur <input name="stroke-width" aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width}px</output></label>
-        <button type="button" disabled={!turn?.strokes.length} onClick={() => turn && send({ type: "undo", turnId: turn.id })}>Annuler</button>
-        <button type="button" onClick={() => turn && send({ type: "redo", turnId: turn.id })}>Rétablir</button>
+        <button type="button" disabled={!turn?.strokes.length} onClick={() => { if (turn) { haptic(6); send({ type: "undo", turnId: turn.id }); } }}>Annuler</button>
+        <button type="button" onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
         <button type="button" disabled={!turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
       </div>
       <p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p>
@@ -570,10 +729,10 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
       {["armed", "drawing"].includes(snapshot.phase) && isDrawer ? (
         <>
           <section className="secret-word"><span>Votre mot secret</span><strong>{snapshot.secretWord}</strong>{snapshot.phase === "armed" ? <p>Le chronomètre démarre à votre premier trait. Commencez avant <Timer deadlineAt={turn?.armedDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p> : <Timer deadlineAt={turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} large />}</section>
+          {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <WinnerSelection snapshot={snapshot} send={send} /> : null}
           <DrawingBoard snapshot={snapshot} send={send} />
         </>
       ) : null}
-      {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <WinnerSelection snapshot={snapshot} send={send} /> : null}
       {snapshot.phase === "revealing" ? <Reveal snapshot={snapshot} /> : null}
       <section className="terminal-mode-card"><div><strong>Ce terminal peut aussi projeter</strong><p>Activez le fond noir et les traits lumineux pour le plexiglas.</p></div><button disabled={isDrawer} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal du dessinateur reste disponible jusqu’à la fin du tour.</small> : null}</section>
       <Scoreboard snapshot={snapshot} />
@@ -583,16 +742,21 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
 
 function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const turn = snapshot.turn;
+  const [selectedWinnerId, setSelectedWinnerId] = useState<string | null>(null);
+  const candidates = snapshot.players.filter((player) => player.id !== turn?.drawerId);
+  useEffect(() => setSelectedWinnerId(null), [turn?.id]);
   if (!turn) return null;
-  const chooseWinner = (playerId: string): void => {
+  const selectedWinner = candidates.find((player) => player.id === selectedWinnerId) ?? null;
+  const chooseWinner = (): void => {
+    if (!selectedWinner) return;
     haptic([12, 35, 18]);
-    send({ type: "select_winner", turnId: turn.id, playerId });
+    send({ type: "select_winner", turnId: turn.id, playerId: selectedWinner.id });
   };
   const chooseNobody = (): void => {
     haptic(10);
     send({ type: "no_winner", turnId: turn.id });
   };
-  return <section className="resolution"><p className="eyebrow">Fin du tour</p><h2>Qui a trouvé ?</h2><p>Validez la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} className="winner-button" onClick={() => chooseWinner(player.id)}>{player.name}<span>+1</span></button>)}<button className="no-winner-button" onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
+  return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Validation du dessinateur</p><h2 id="winner-selection-title">Qui a trouvé ?</h2><p>Sélectionnez un joueur, puis validez son point.</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">+1</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : il n’y a pas de joueur à départager.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!selectedWinner} onClick={chooseWinner}>{selectedWinner ? `Valider le point de ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -767,9 +931,9 @@ function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSn
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
   const copies = useMemo(() => layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0], [layout]);
   return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}`}>
-    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
+    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
     <section className={`projection-stage projection-stage--${layout}`}>
-      {copies.map((rotation, index) => <div key={rotation} className="projection-copy" style={{ "--rotation": `${rotation}deg` } as React.CSSProperties}>
+      {copies.map((rotation, index) => <div key={rotation} className={`projection-copy projection-copy--${rotation}`}>
         {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><ProjectionCue snapshot={snapshot} /><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" ariaLabel="Projection du dessin en cours" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
       </div>)}
     </section>
@@ -800,14 +964,27 @@ function ProjectionSettings({ snapshot, layout, calibration, onLayoutChange, onC
 }
 
 function CalibrationMark({ number }: { number: number }) {
-  return <div className="calibration-mark"><span className="calibration-corner calibration-corner--one">↖</span><span className="calibration-corner calibration-corner--two">↗</span><span className="calibration-corner calibration-corner--three">↘</span><span className="calibration-corner calibration-corner--four">↙</span><strong>{number}</strong><small>PRISME</small></div>;
+  return <div className="calibration-mark"><span className="calibration-corner calibration-corner--one">↖</span><span className="calibration-corner calibration-corner--two">↗</span><span className="calibration-corner calibration-corner--three">↘</span><span className="calibration-corner calibration-corner--four">↙</span><strong>{number}</strong><small>PICTIOFADY</small></div>;
 }
 
 function RoomHeader({ snapshot, label }: { snapshot: RoomSnapshot; label: string }) {
-  return <header className="room-header"><div><span className="brand">PRISME</span><span className="room-label">{label}</span></div><div><span className="room-code">{snapshot.code}</span><span className="status-dot">en direct</span></div></header>;
+  return <header className="room-header"><div><span className="brand">PICTIOFADY</span><span className="room-label">{label}</span></div><div><span className="room-code">{snapshot.code}</span><span className="status-dot">en direct</span></div></header>;
 }
 
-function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
+function PwaInstallCard({ pwa }: { pwa: PwaControls }) {
+  if (pwa.isInstalled || (!pwa.canInstall && !pwa.isAppleMobile)) return null;
+  return <aside className="pwa-install-card" aria-label="Installer PictioFady">
+    <div><span className="pwa-install-card__icon" aria-hidden="true">◇</span><p className="eyebrow">Mode application</p><strong>Gardez PictioFady à portée de main.</strong><p>{pwa.isAppleMobile && !pwa.canInstall ? "Sur iPhone ou iPad : touchez Partager, puis « Sur l’écran d’accueil »." : "Installez l’application pour ouvrir plus vite la projection et profiter du plein écran."}</p></div>
+    {pwa.canInstall ? <button type="button" className="button button--primary" onClick={() => void pwa.install()}>Installer</button> : null}
+  </aside>;
+}
+
+function PwaUpdateNotice({ pwa }: { pwa: PwaControls }) {
+  if (!pwa.updateAvailable) return null;
+  return <aside className="pwa-update" role="status"><span>Une amélioration est prête.</span><button type="button" onClick={pwa.applyUpdate}>Actualiser</button></aside>;
+}
+
+function Home({ onSession, pwa }: { onSession: (session: StoredSession) => void; pwa: PwaControls }) {
   const initialCode = normaliseCode(new URLSearchParams(window.location.search).get("join") ?? "");
   const [code, setCode] = useState(initialCode);
   const [error, setError] = useState<string | null>(null);
@@ -827,15 +1004,16 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
       onSession(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Connexion impossible."); } finally { setBusy(false); }
   };
-  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Un téléphone prépare la partie et projette. Les autres deviennent, au choix, un crayon ou un autre projecteur.</p><ol className="quick-start" aria-label="Démarrage en trois étapes"><li><span>1</span>Créez la salle</li><li><span>2</span>Ajoutez les joueurs</li><li><span>3</span>Faites apparaître le dessin</li></ol><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><h2>Un terminal suffit.</h2><form onSubmit={join}><label>Code de salle<input name="room-code" value={code} placeholder="ABC123" maxLength={6} autoCapitalize="characters" autoCorrect="off" onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Confiez-le au dessinateur ou passez en projection quand vous voulez.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre la salle"}</button></form>{error ? <p className="error-message" role="alert">{error}</p> : null}</section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Un téléphone prépare la partie et projette. Les autres deviennent, au choix, un crayon ou un autre projecteur.</p><ol className="quick-start" aria-label="Démarrage en trois étapes"><li><span>1</span>Créez la salle</li><li><span>2</span>Ajoutez les joueurs</li><li><span>3</span>Faites apparaître le dessin</li></ol><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><h2>Un terminal suffit.</h2><form onSubmit={join}><label>Code de salle<input name="room-code" value={code} placeholder="ABC123" maxLength={6} autoCapitalize="characters" autoCorrect="off" onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Confiez-le au dessinateur ou passez en projection quand vous voulez.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre la salle"}</button></form>{error ? <p className="error-message" role="alert">{error}</p> : null}<PwaInstallCard pwa={pwa} /></section></main>;
 }
 
 export function App() {
   const [session, setSession] = useState<StoredSession | null>(() => loadSession());
+  const pwa = usePwaLifecycle();
   const { snapshot, connectionError, connected, send } = useRoomSocket(session);
   const adoptSession = (next: StoredSession): void => { saveSession(next); setSession(next); };
   const leave = (): void => { saveSession(null); setSession(null); };
-  if (!session) return <Home onSession={adoptSession} />;
-  if (!snapshot) return <main className="loading"><span className="brand">PRISME</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main>;
-  return <><div className={`connection-banner${connected ? "" : " is-offline"}`} role="status">{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{connected && connectionError ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
+  if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} pwa={pwa} /></>;
+  if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main></>;
+  return <><PwaUpdateNotice pwa={pwa} /><div className={`connection-banner${connected ? "" : " is-offline"}`} role="status">{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{connected && connectionError ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
 }

@@ -1,0 +1,9 @@
+:root { color: #f7f5ff; background: #090b16; font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { display: grid; min-width: 320px; min-height: 100vh; min-height: 100dvh; margin: 0; padding: max(1.5rem, env(safe-area-inset-top)) max(1.5rem, env(safe-area-inset-right)) max(1.5rem, env(safe-area-inset-bottom)) max(1.5rem, env(safe-area-inset-left)); background: radial-gradient(circle at 75% 20%, #4b3177 0, transparent 30rem), #090b16; }
+main { display: grid; align-content: center; justify-items: center; max-width: 28rem; margin: auto; text-align: center; }
+.prism { display: grid; width: 5rem; height: 5rem; place-items: center; margin-bottom: 1.25rem; border: 1px solid #cbb5ff; border-radius: 1.5rem; color: #e7ddff; box-shadow: 0 0 3rem #9a7ae944; font-size: 3.5rem; }
+.brand { margin: 0 0 .75rem; color: #cbb5ff; font-size: .78rem; font-weight: 900; letter-spacing: .2em; }
+h1 { margin: 0 0 1rem; font-size: clamp(2.25rem, 11vw, 3.8rem); line-height: .95; letter-spacing: -.06em; }
+p { color: #c9c7d8; line-height: 1.6; }
+a { min-height: 3rem; margin-top: 1.2rem; border: 0; border-radius: 999px; padding: .75rem 1.25rem; color: #160f22; background: #cbb5ff; font: inherit; font-weight: 900; text-decoration: none; }

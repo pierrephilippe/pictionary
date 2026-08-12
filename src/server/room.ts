@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { ZodError } from "zod";
 import {
   addPlayer,
   appendStroke,
@@ -41,9 +42,13 @@ const TICKET_TTL_MS = 60 * 1000;
 const TERMINAL_SESSION_IDLE_MS = 30 * 60 * 1000;
 const MAX_TERMINAL_SESSIONS = 16;
 const MAX_ROOM_SOCKETS = 20;
+const COMMAND_WINDOW_MS = 1_000;
+const MAX_COMMANDS_PER_WINDOW = 40;
 
 const asErrorMessage = (error: unknown): string => error instanceof GameRuleError
   ? error.message
+  : error instanceof ZodError
+    ? "Commande invalide."
   : "Une erreur de jeu est survenue.";
 
 const randomId = (): string => {
@@ -172,11 +177,19 @@ export class GameRoom extends DurableObject {
       }
       const session = this.getSession(attachment.sessionId);
       try {
+        // Count every accepted socket frame, including malformed and refused
+        // commands. Persisting the counter in the error path keeps the limit
+        // effective when a hibernating Durable Object is revived.
+        this.enforceCommandRate(session, Date.now());
         const command = clientCommandSchema.parse(JSON.parse(message));
         const stroke = await this.applyCommand(session, command);
         if (stroke) this.broadcastStroke(stroke);
         else this.broadcast();
       } catch (error) {
+        // `enforceCommandRate` mutates the session before a command can be
+        // rejected. Persist it so invalid-message floods cannot reset their
+        // allowance by relying on Durable Object hibernation.
+        this.persist();
         this.sendError(ws, asErrorMessage(error));
       }
     };
@@ -386,6 +399,8 @@ export class GameRoom extends DurableObject {
       delete legacySession.playerId;
       legacySession.lastSeenAt ??= legacySession.createdAt;
       legacySession.displayMode ??= legacySession.role === "terminal" ? "drawing" : "projection";
+      legacySession.commandWindowStartedAt ??= legacySession.lastSeenAt;
+      legacySession.commandCount ??= 0;
     }
     if (state.current) {
       state.current.id ??= `legacy-turn-${state.current.round}`;
@@ -408,6 +423,22 @@ export class GameRoom extends DurableObject {
       "INSERT OR REPLACE INTO room_state (id, payload) VALUES (1, ?)",
       JSON.stringify(state),
     );
+  }
+
+  private enforceCommandRate(session: Session, now: number): void {
+    const windowStartedAt = session.commandWindowStartedAt ?? now;
+    if (now - windowStartedAt >= COMMAND_WINDOW_MS) {
+      session.commandWindowStartedAt = now;
+      session.commandCount = 1;
+    } else {
+      const commandCount = session.commandCount ?? 0;
+      if (commandCount >= MAX_COMMANDS_PER_WINDOW) {
+        throw new GameRuleError("Trop de commandes envoyées : réessayez dans un instant.");
+      }
+      session.commandWindowStartedAt = windowStartedAt;
+      session.commandCount = commandCount + 1;
+    }
+    session.lastSeenAt = now;
   }
 
   private async scheduleNextAlarm(): Promise<void> {

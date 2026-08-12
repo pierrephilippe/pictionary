@@ -62,6 +62,68 @@ const send = async (
 };
 
 describe("Worker et Durable Object de salle", () => {
+  it("borne et valide les entrées HTTP, sans exposer de réponse API sans protections", async () => {
+    const malformed = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ unexpected: true }),
+    });
+    expect(malformed.status).toBe(400);
+    await expect(json<{ error: string }>(malformed)).resolves.toEqual({ error: "La requête de création est invalide." });
+    expect(malformed.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(malformed.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(malformed.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+
+    const oversized = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ padding: "x".repeat(4_100) }),
+    });
+    expect(oversized.status).toBe(400);
+    await expect(json<{ error: string }>(oversized)).resolves.toEqual({ error: "La requête est trop volumineuse." });
+  });
+
+  it("refuse les propriétés inattendues dans les commandes WebSocket", async () => {
+    const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+
+    const rejected = await send(controllerSocket, { type: "start_game", elevated: true }, (message) => message.type === "error");
+    expect(rejected).toMatchObject({ type: "error", message: "Commande invalide." });
+    controllerSocket.close();
+  });
+
+  it("limite aussi les commandes WebSocket rejetées", async () => {
+    const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+
+    for (let index = 0; index < 40; index += 1) {
+      const rejected = await send(
+        controllerSocket,
+        { type: "start_game", elevated: true },
+        (message) => message.type === "error",
+      );
+      expect(rejected).toMatchObject({ type: "error", message: "Commande invalide." });
+    }
+
+    const limited = await send(
+      controllerSocket,
+      { type: "start_game", elevated: true },
+      (message) => message.type === "error",
+    );
+    expect(limited).toMatchObject({ type: "error", message: "Trop de commandes envoyées : réessayez dans un instant." });
+    controllerSocket.close();
+  });
+
   it("sépare joueurs et terminaux, et laisse le dessinateur valider le gagnant", async () => {
     const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
       method: "POST",

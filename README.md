@@ -1,6 +1,8 @@
-# Prisme — Pictionary holographique
+# PictioFady — Pictionary holographique
 
 PWA multijoueur pour une projection type Pepper’s ghost : le téléphone qui crée la salle devient l’écran du prisme au lancement. Les joueurs sont inscrits sur ce téléphone principal ; les autres téléphones servent uniquement de terminaux de dessin interchangeables.
+
+L’application peut être installée depuis le navigateur. Elle conserve son interface hors ligne pour un redémarrage propre, mais une connexion est toujours nécessaire pendant une partie : le dessin, les scores et le mot secret restent autoritaires dans le Durable Object.
 
 ## Prérequis
 
@@ -52,4 +54,21 @@ La règle de branche GitHub doit exiger une pull request pour `main` si l’on v
 
 Une partie peut inclure un seul joueur et jusqu’à 16 téléphones terminaux. À chaque tour, donnez n’importe quel téléphone terminal au dessinateur désigné : il démarre son tour, dessine puis sélectionne dans la liste le joueur qui a trouvé — ou « Personne n’a trouvé ». Le gagnant et le dessinateur gagnent chacun un point. Sans validation avant la fin du chronomètre, personne ne marque. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes ; le mot reste révélé cinq secondes, puis le tour suivant commence automatiquement.
 
-Le téléphone créateur choisit une mire pour pyramide (4 faces), plexiglas en V (2 faces) ou plaque simple (1 face). Pour de meilleurs résultats, mettre l’écran à luminosité maximale, activer le plein écran et centrer le plexiglas sur la mire.
+Le téléphone créateur choisit une mire pour pyramide (4 faces), plexiglas en V (2 faces) ou plaque simple (1 face). Pour de meilleurs résultats, mettre l’écran à luminosité maximale, activer le plein écran et centrer le plexiglas sur la mire. En V ou sur plaque, tournez l’écran en paysage ; en pyramide, le portrait est privilégié.
+
+## Fiabilité et sécurité
+
+- Le Worker applique des en-têtes de sécurité sur l’interface et les API, refuse les corps JSON dépassant 4 KiB et valide strictement chaque commande.
+- Les jetons de session et tickets WebSocket sont opaques, courts et validés côté Durable Object ; le mot n’est inclus que dans le snapshot du terminal dessinateur actif.
+- Les traits sont limités côté protocole et moteur, persistés avant diffusion, puis restaurés au reconnect. Le client espace ses reconnexions et reprend dès le retour du réseau.
+- Le service worker ne met en cache que l’enveloppe statique de l’application. Les routes `/api/` et les WebSockets ne sont jamais mis en cache.
+
+## Compatibilité mobile à valider sur appareils physiques
+
+Le mode projection est conçu pour être fiable sans dépendre d’API optionnelles : il utilise la totalité du viewport visible, puis demande le plein écran, l’orientation et le maintien d’écran actif lorsqu’ils sont disponibles.
+
+- **Safari iOS récent :** l’installation passe par le menu Partager ; le plein écran et le verrouillage d’orientation peuvent être indisponibles. Le mode immersif CSS et l’indication « tournez le téléphone » restent donc la solution de repli.
+- **Chrome Android récent :** vérifier l’entrée/sortie du plein écran après action utilisateur, le verrouillage paysage en V/plaque et la reprise du `Wake Lock` après retour au premier plan.
+- **Dans les deux cas :** vérifier le dessin tactile, le QR/code court, la reconnexion après mode avion, la restauration du dessin et le rendu réel des trois supports à luminosité maximale.
+
+Les résultats synthétiques et le détail des audits sont consignés dans [`docs/quality-audit.md`](docs/quality-audit.md) et [`security_best_practices_report.md`](security_best_practices_report.md).

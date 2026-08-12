@@ -70,6 +70,8 @@ export interface Session {
   displayMode?: TerminalDisplayMode;
   createdAt: number;
   lastSeenAt: number;
+  commandWindowStartedAt?: number;
+  commandCount?: number;
 }
 
 export interface ConnectionTicket {
