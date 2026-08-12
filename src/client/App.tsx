@@ -27,6 +27,11 @@ interface ApiError {
   error?: string;
 }
 
+type ServerMessage =
+  | { type: "snapshot"; snapshot: RoomSnapshot }
+  | { type: "stroke_delta"; round: number; stroke: Stroke }
+  | { type: "error"; message?: string };
+
 const ACTIVE_SESSION_KEY = "prisme.active-session";
 
 const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
@@ -92,8 +97,11 @@ function useRoomSocket(session: StoredSession | null) {
         };
         socket.onmessage = (event) => {
           try {
-            const message = JSON.parse(String(event.data)) as { type: string; snapshot?: RoomSnapshot; message?: string };
-            if (message.type === "snapshot" && message.snapshot) setSnapshot(message.snapshot);
+            const message = JSON.parse(String(event.data)) as ServerMessage;
+            if (message.type === "snapshot") setSnapshot(message.snapshot);
+            if (message.type === "stroke_delta") {
+              setSnapshot((previous) => mergeStrokeDelta(previous, message.round, message.stroke));
+            }
             if (message.type === "error") setConnectionError(message.message ?? "Commande refusée.");
           } catch {
             setConnectionError("Réponse serveur illisible.");
@@ -131,6 +139,20 @@ function useRoomSocket(session: StoredSession | null) {
 
   return { snapshot, connectionError, connected, send };
 }
+
+const mergeStrokeDelta = (snapshot: RoomSnapshot | null, round: number, stroke: Stroke): RoomSnapshot | null => {
+  if (!snapshot?.turn || snapshot.turn.round !== round) return snapshot;
+  const strokes = snapshot.turn.strokes.map((candidate) => ({ ...candidate, points: [...candidate.points] }));
+  const existing = strokes.find((candidate) => candidate.id === stroke.id);
+  if (existing) {
+    if (existing.complete) return snapshot;
+    existing.points.push(...stroke.points);
+    existing.complete ||= stroke.complete;
+  } else {
+    strokes.push({ ...stroke, points: [...stroke.points] });
+  }
+  return { ...snapshot, turn: { ...snapshot.turn, strokes } };
+};
 
 const formatTime = (milliseconds: number): string => {
   const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
@@ -262,9 +284,9 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
 
   const flush = (complete: boolean): void => {
     const active = activeRef.current;
-    if (!active || pendingRef.current.length === 0) return;
+    if (!active || !turn || pendingRef.current.length === 0) return;
     const points = pendingRef.current.splice(0);
-    send({ type: "stroke", stroke: { id: active.id, tool: active.tool, width: active.width, points, complete } });
+    send({ type: "stroke", turnId: turn.id, stroke: { id: active.id, tool: active.tool, width: active.width, points, complete } });
     lastFlushRef.current = performance.now();
   };
 
@@ -276,6 +298,7 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     activeRef.current = active;
     pendingRef.current = [];
     startedRef.current = false;
+    lastFlushRef.current = performance.now();
     setDraft(active);
   };
 
@@ -295,7 +318,7 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
       pendingRef.current.push(point);
     }
     setDraft({ ...active, points: [...active.points] });
-    if (startedRef.current && performance.now() - lastFlushRef.current > 45) flush(false);
+    if (startedRef.current && performance.now() - lastFlushRef.current >= 80) flush(false);
   };
 
   const up = (event: React.PointerEvent<HTMLCanvasElement>): void => {
@@ -317,8 +340,9 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
         <button type="button" className={tool === "pen" ? "selected" : ""} onClick={() => setTool("pen")}>Crayon</button>
         <button type="button" className={tool === "eraser" ? "selected" : ""} onClick={() => setTool("eraser")}>Gomme</button>
         <label>Épaisseur <input aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /></label>
-        <button type="button" onClick={() => send({ type: "undo" })}>Annuler</button>
-        <button type="button" onClick={() => send({ type: "clear" })}>Tout effacer</button>
+        <button type="button" onClick={() => turn && send({ type: "undo", turnId: turn.id })}>Annuler</button>
+        <button type="button" onClick={() => turn && send({ type: "redo", turnId: turn.id })}>Rétablir</button>
+        <button type="button" onClick={() => turn && send({ type: "clear", turnId: turn.id })}>Tout effacer</button>
       </div>
       <DrawingCanvas
         strokes={turn?.strokes ?? []}
@@ -344,7 +368,7 @@ function PlayerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
         <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} dessine` : "La partie se prépare"}</h1><p>Regardez le prisme et devinez à voix haute.</p>{turn?.deadlineAt ? <Timer deadlineAt={turn.deadlineAt} large /> : null}</section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && isDrawer ? (
-        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone.</p><button className="button button--primary" onClick={() => send({ type: "ready" })}>Je suis prêt·e</button></section>
+        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
       ) : null}
       {["armed", "drawing"].includes(snapshot.phase) && isDrawer ? (
         <>
@@ -405,8 +429,8 @@ function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (c
           <Participants snapshot={snapshot} />
         </>
       ) : null}
-      {snapshot.phase === "awaiting_ready" && turn ? <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit se préparer</h1><p>Le mot apparaîtra sur son téléphone, puis le premier trait lancera le temps.</p><button onClick={() => send({ type: "cancel_turn" })}>Changer ce tour</button></section> : null}
-      {["armed", "drawing"].includes(snapshot.phase) && turn ? <section className="control-turn"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} dessine</h1>{turn.deadlineAt ? <Timer deadlineAt={turn.deadlineAt} large /> : <p>Le chronomètre démarrera au premier trait.</p>}<ResolutionControls snapshot={snapshot} send={send} /><button onClick={() => send({ type: "cancel_turn" })}>Annuler ce tour</button></section> : null}
+      {snapshot.phase === "awaiting_ready" && turn ? <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit se préparer</h1><p>Le mot apparaîtra sur son téléphone, puis le premier trait lancera le temps.</p><button onClick={() => send({ type: "cancel_turn", turnId: turn.id })}>Changer ce tour</button></section> : null}
+      {["armed", "drawing"].includes(snapshot.phase) && turn ? <section className="control-turn"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} dessine</h1>{turn.deadlineAt ? <Timer deadlineAt={turn.deadlineAt} large /> : <p>Le chronomètre démarrera au premier trait.</p>}<ResolutionControls snapshot={snapshot} send={send} /><button onClick={() => send({ type: "cancel_turn", turnId: turn.id })}>Annuler ce tour</button></section> : null}
       {snapshot.phase === "revealing" ? <><Reveal snapshot={snapshot} /><ResolutionControls snapshot={snapshot} send={send} /></> : null}
       {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
       {snapshot.phase !== "lobby" ? <><Participants snapshot={snapshot} /><button className="end-game" onClick={() => send({ type: "end_game" })}>Terminer la partie</button></> : null}
@@ -418,9 +442,9 @@ function ResolutionControls({ snapshot, send }: { snapshot: RoomSnapshot; send: 
   const turn = snapshot.turn;
   if (!turn) return null;
   if (!snapshot.controllerResolutionPending) {
-    return snapshot.phase === "revealing" ? <button className="button button--primary" onClick={() => send({ type: "next_turn" })}>{turn.round >= snapshot.settings.rounds ? "Voir les gagnants" : "Tour suivant"}</button> : null;
+    return snapshot.phase === "revealing" ? <button className="button button--primary" onClick={() => send({ type: "next_turn", turnId: turn.id })}>{turn.round >= snapshot.settings.rounds ? "Voir les gagnants" : "Tour suivant"}</button> : null;
   }
-  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Validez selon les réponses entendues.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", playerId: player.id })}>{player.name}</button>)}<button onClick={() => send({ type: "no_winner" })}>Personne</button></div></section>;
+  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Validez selon les réponses entendues.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}<button onClick={() => send({ type: "no_winner", turnId: turn.id })}>Personne</button></div></section>;
 }
 
 function Participants({ snapshot }: { snapshot: RoomSnapshot }) {

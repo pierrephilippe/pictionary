@@ -3,5 +3,6 @@ dist/
 .wrangler/
 .playwright-cli/
 coverage/
+*.cpuprofile
 worker-configuration.d.ts
 .dev.vars

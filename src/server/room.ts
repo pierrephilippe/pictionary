@@ -10,6 +10,7 @@ import {
   GameRuleError,
   nextTurn,
   ready,
+  redo,
   selectNoWinner,
   selectWinner,
   snapshotFor,
@@ -19,7 +20,6 @@ import {
 } from "../domain/game";
 import type { Player, RoomState, Session } from "../domain/types";
 import { clientCommandSchema, type ClientCommand, type JoinRoomRequest } from "../shared/protocol";
-import type { Env } from "./worker";
 
 interface SocketAttachment {
   sessionId: string;
@@ -47,6 +47,8 @@ const randomId = (): string => {
   crypto.getRandomValues(bytes);
   return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 };
+
+const secureRandom = (): number => crypto.getRandomValues(new Uint32Array(1))[0]! / 0x1_0000_0000;
 
 export class GameRoom extends DurableObject {
   private state: RoomState | null = null;
@@ -115,6 +117,7 @@ export class GameRoom extends DurableObject {
     state.tickets.push({ value: ticket, sessionId: session.id, expiresAt: now + TICKET_TTL_MS });
     state.updatedAt = now;
     this.persist();
+    await this.scheduleNextAlarm();
     return { ticket };
   }
 
@@ -154,8 +157,9 @@ export class GameRoom extends DurableObject {
     const session = this.getSession(attachment.sessionId);
     try {
       const command = clientCommandSchema.parse(JSON.parse(message));
-      await this.applyCommand(session, command);
-      this.broadcast();
+      const stroke = await this.applyCommand(session, command);
+      if (stroke) this.broadcastStroke(stroke);
+      else this.broadcast();
     } catch (error) {
       this.sendError(ws, asErrorMessage(error));
     }
@@ -174,23 +178,30 @@ export class GameRoom extends DurableObject {
     if (!state) return;
     const now = Date.now();
     if (state.phase === "drawing" && state.current?.deadlineAt && state.current.deadlineAt <= now) {
-      expireTurn(state, now);
-      this.persist();
-      this.broadcast();
-      await this.scheduleNextAlarm();
-      return;
+      if (expireTurn(state, now)) {
+        this.persist();
+        this.broadcast();
+        await this.scheduleNextAlarm();
+        return;
+      }
     }
     if (state.updatedAt + ROOM_TTL_MS <= now) {
       this.ctx.storage.sql.exec("DELETE FROM room_state WHERE id = 1");
       this.state = null;
+      for (const ws of this.ctx.getWebSockets()) ws.close(1001, "Room expired");
       return;
     }
     await this.ctx.storage.setAlarm(state.updatedAt + ROOM_TTL_MS);
   }
 
-  private async applyCommand(session: Session, command: ClientCommand): Promise<void> {
+  private async applyCommand(session: Session, command: ClientCommand): Promise<import("../domain/types").Stroke | null> {
     const state = this.requireState();
     const now = Date.now();
+    if (expireTurn(state, now)) {
+      this.persist();
+      this.broadcast();
+      await this.scheduleNextAlarm();
+    }
     const requireController = (): void => {
       if (session.role !== "controller") throw new GameRuleError("Réservé au contrôleur de jeu.");
     };
@@ -198,7 +209,12 @@ export class GameRoom extends DurableObject {
       if (session.role !== "player" || !session.playerId) throw new GameRuleError("Réservé au dessinateur.");
       return session.playerId;
     };
+    const requireCurrentTurn = (turnId: string): void => {
+      if (!state.current || state.current.id !== turnId) throw new GameRuleError("Cette commande concerne un tour déjà terminé.");
+    };
 
+    let strokeDelta: import("../domain/types").Stroke | null = null;
+    let shouldScheduleAlarm = true;
     switch (command.type) {
       case "configure":
         requireController();
@@ -206,50 +222,64 @@ export class GameRoom extends DurableObject {
         break;
       case "start_game":
         requireController();
-        startGame(state, now, Math.random);
+        startGame(state, now, secureRandom);
         break;
       case "ready":
-        ready(state, requireDrawer(), now, Math.random);
+        requireCurrentTurn(command.turnId);
+        ready(state, requireDrawer(), now, secureRandom);
         break;
       case "stroke": {
-        appendStroke(state, requireDrawer(), command.stroke, now);
+        requireCurrentTurn(command.turnId);
+        const result = appendStroke(state, requireDrawer(), command.stroke, now);
+        strokeDelta = result.stroke;
+        shouldScheduleAlarm = result.deadlineAt !== null;
         break;
       }
       case "undo":
+        requireCurrentTurn(command.turnId);
         undo(state, requireDrawer(), now);
+        shouldScheduleAlarm = false;
+        break;
+      case "redo":
+        requireCurrentTurn(command.turnId);
+        redo(state, requireDrawer(), now);
+        shouldScheduleAlarm = false;
         break;
       case "clear":
+        requireCurrentTurn(command.turnId);
         clear(state, requireDrawer(), now);
+        shouldScheduleAlarm = false;
         break;
       case "select_winner":
         requireController();
+        requireCurrentTurn(command.turnId);
         selectWinner(state, command.playerId, now);
-        await this.ctx.storage.deleteAlarm();
         break;
       case "no_winner":
         requireController();
-        selectNoWinner(state, now, Math.random);
-        await this.ctx.storage.deleteAlarm();
+        requireCurrentTurn(command.turnId);
+        selectNoWinner(state, now, secureRandom);
         break;
       case "next_turn":
         requireController();
+        requireCurrentTurn(command.turnId);
         nextTurn(state, now);
         break;
       case "cancel_turn":
         requireController();
+        requireCurrentTurn(command.turnId);
         cancelTurn(state, now);
-        await this.ctx.storage.deleteAlarm();
         break;
       case "end_game":
         requireController();
         endGame(state, now);
-        await this.ctx.storage.deleteAlarm();
         break;
       default:
         command satisfies never;
     }
     this.persist();
-    await this.scheduleNextAlarm();
+    if (shouldScheduleAlarm) await this.scheduleNextAlarm();
+    return strokeDelta;
   }
 
   private broadcast(): void {
@@ -264,6 +294,15 @@ export class GameRoom extends DurableObject {
 
   private sendSnapshot(ws: WebSocket, session: Session): void {
     ws.send(JSON.stringify({ type: "snapshot", snapshot: snapshotFor(this.requireState(), session, Date.now()) }));
+  }
+
+  private broadcastStroke(stroke: import("../domain/types").Stroke): void {
+    const round = this.requireState().current?.round;
+    if (!round) return;
+    const message = JSON.stringify({ type: "stroke_delta", round, stroke });
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(message);
+    }
   }
 
   private sendError(ws: WebSocket, message: string): void {
@@ -295,7 +334,17 @@ export class GameRoom extends DurableObject {
 
   private readState(): RoomState | null {
     const row = this.ctx.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").toArray()[0];
-    return row ? JSON.parse(row.payload) as RoomState : null;
+    if (!row) return null;
+    const state = JSON.parse(row.payload) as RoomState;
+    state.turnSequence ??= state.current?.round ?? 0;
+    if (state.current) {
+      state.current.id ??= `legacy-turn-${state.current.round}`;
+      state.current.redoStrokes ??= [];
+      if (!Number.isInteger(state.current.pointCount) || state.current.pointCount < 0) {
+        state.current.pointCount = state.current.strokes.reduce((total, stroke) => total + stroke.points.length, 0);
+      }
+    }
+    return state;
   }
 
   private persist(): void {
@@ -309,6 +358,7 @@ export class GameRoom extends DurableObject {
   private async scheduleNextAlarm(): Promise<void> {
     const state = this.requireState();
     const deadline = state.phase === "drawing" ? state.current?.deadlineAt : null;
-    await this.ctx.storage.setAlarm(deadline ?? state.updatedAt + ROOM_TTL_MS);
+    const nextAlarm = deadline ?? state.updatedAt + ROOM_TTL_MS;
+    if (await this.ctx.storage.getAlarm() !== nextAlarm) await this.ctx.storage.setAlarm(nextAlarm);
   }
 }

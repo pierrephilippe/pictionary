@@ -21,17 +21,20 @@ const settingsSchema = z.object({
   difficulties: z.array(z.enum(DIFFICULTIES)).min(1),
 });
 
+const turnCommand = z.object({ turnId: z.string().min(6).max(80) });
+
 export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("configure"), settings: settingsSchema }),
   z.object({ type: z.literal("start_game") }),
-  z.object({ type: z.literal("ready") }),
-  z.object({ type: z.literal("stroke"), stroke: strokeSchema }),
-  z.object({ type: z.literal("undo") }),
-  z.object({ type: z.literal("clear") }),
-  z.object({ type: z.literal("select_winner"), playerId: z.string().min(8).max(80) }),
-  z.object({ type: z.literal("no_winner") }),
-  z.object({ type: z.literal("next_turn") }),
-  z.object({ type: z.literal("cancel_turn") }),
+  z.object({ type: z.literal("ready") }).merge(turnCommand),
+  z.object({ type: z.literal("stroke"), stroke: strokeSchema }).merge(turnCommand),
+  z.object({ type: z.literal("undo") }).merge(turnCommand),
+  z.object({ type: z.literal("redo") }).merge(turnCommand),
+  z.object({ type: z.literal("clear") }).merge(turnCommand),
+  z.object({ type: z.literal("select_winner"), playerId: z.string().min(8).max(80) }).merge(turnCommand),
+  z.object({ type: z.literal("no_winner") }).merge(turnCommand),
+  z.object({ type: z.literal("next_turn") }).merge(turnCommand),
+  z.object({ type: z.literal("cancel_turn") }).merge(turnCommand),
   z.object({ type: z.literal("end_game") }),
 ]);
 

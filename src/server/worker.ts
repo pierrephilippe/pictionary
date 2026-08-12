@@ -4,14 +4,6 @@ import { GameRoom } from "./room";
 
 export { GameRoom } from "./room";
 
-export interface Env {
-  GAME_ROOM: DurableObjectNamespace<GameRoom>;
-  ASSETS: Fetcher;
-  ENVIRONMENT: "development" | "staging" | "production";
-}
-
-type GameRoomStub = DurableObjectStub & Pick<GameRoom, "create" | "join" | "issueTicket">;
-
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const json = (value: unknown, init: ResponseInit = {}): Response => new Response(JSON.stringify(value), {
@@ -52,7 +44,7 @@ const bearerToken = (request: Request): string | null => {
   return value?.startsWith("Bearer ") ? value.slice(7) : null;
 };
 
-const asStub = (env: Env, code: string): GameRoomStub => env.GAME_ROOM.getByName(`room:${code}`) as unknown as GameRoomStub;
+const asStub = (env: Env, code: string) => env.GAME_ROOM.getByName(`room:${code}`);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -104,7 +96,7 @@ export default {
       const message = error instanceof Error ? error.message : "Erreur serveur.";
       if (message === "Cette salle n’existe plus.") return errorResponse(message, 404);
       if (message === "Session invalide.") return errorResponse(message, 401);
-      console.warn("pictionary_api_error", { path: url.pathname, message });
+      console.warn(JSON.stringify({ event: "pictionary_api_error", path: url.pathname, message }));
       return errorResponse(message, 400);
     }
   },

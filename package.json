@@ -7,13 +7,14 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "prebuild": "npm run types",
     "build": "tsc --noEmit && vite build",
     "dev": "npm run build && wrangler dev --local",
     "dev:ui": "vite",
     "test": "vitest run",
     "test:watch": "vitest",
     "types": "wrangler types ./src/server/worker-configuration.d.ts",
-    "check": "npm run types && npm run build && npm run test",
+    "check": "npm run build && npm run test",
     "deploy:staging": "npm run build && wrangler deploy --env staging",
     "deploy:production": "npm run build && wrangler deploy --env production"
   },

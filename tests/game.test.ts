@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   addPlayer,
   appendStroke,
+  cancelTurn,
   createRoomState,
   expireTurn,
+  GameRuleError,
+  MAX_POINTS_PER_STROKE,
   nextTurn,
+  redo,
   ready,
   selectNoWinner,
   selectWinner,
   snapshotFor,
   startGame,
+  undo,
 } from "../src/domain/game";
 import type { Player, Session } from "../src/domain/types";
 
@@ -35,14 +40,14 @@ describe("moteur de jeu", () => {
     expect(state.phase).toBe("armed");
     expect(state.current?.word).not.toBeNull();
 
-    const deadline = appendStroke(state, "player-1", {
+    const appendResult = appendStroke(state, "player-1", {
       id: "stroke-0001",
       tool: "pen",
       width: 8,
       points: [{ x: 0.1, y: 0.2 }, { x: 0.2, y: 0.3 }],
       complete: true,
     }, 5);
-    expect(deadline).toBe(60_005);
+    expect(appendResult.deadlineAt).toBe(60_005);
     expect(state.phase).toBe("drawing");
 
     selectWinner(state, "player-2", 7);
@@ -81,5 +86,51 @@ describe("moteur de jeu", () => {
     expect(snapshotFor(state, drawerSession, 4).secretWord).toBeTruthy();
     expect(snapshotFor(state, otherSession, 4).secretWord).toBeNull();
     expect(snapshotFor(state, projectionSession, 4).secretWord).toBeNull();
+  });
+
+  it("refuse une résolution déjà validée et l’annulation qui la suivrait", () => {
+    const state = startedRoom();
+    ready(state, "player-1", 3, deterministic);
+    appendStroke(state, "player-1", {
+      id: "stroke-0003", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
+    }, 5);
+    selectWinner(state, "player-2", 7);
+
+    expect(() => selectWinner(state, "player-2", 8)).toThrow(GameRuleError);
+    expect(() => selectNoWinner(state, 8, deterministic)).toThrow(GameRuleError);
+    expect(() => cancelTurn(state, 8)).toThrow(GameRuleError);
+    expect(state.players.map((candidate) => candidate.score)).toEqual([1, 1]);
+  });
+
+  it("arrête le dessin à l’échéance et permet de rétablir un trait annulé", () => {
+    const state = startedRoom();
+    ready(state, "player-1", 3, deterministic);
+    appendStroke(state, "player-1", {
+      id: "stroke-0004", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
+    }, 5);
+    undo(state, "player-1", 6);
+    expect(state.current?.strokes).toHaveLength(0);
+    redo(state, "player-1", 7);
+    expect(state.current?.strokes).toHaveLength(1);
+
+    expect(expireTurn(state, 60_004)).toBe(false);
+    expect(() => appendStroke(state, "player-1", {
+      id: "stroke-0005", tool: "pen", width: 8, points: [{ x: 0.2, y: 0.2 }], complete: true,
+    }, 60_005)).toThrow("Le temps est écoulé.");
+    expect(state.phase).toBe("revealing");
+  });
+
+  it("borne le volume du canevas sur un tour", () => {
+    const state = startedRoom();
+    ready(state, "player-1", 3, deterministic);
+    const points = Array.from({ length: MAX_POINTS_PER_STROKE }, (_, index) => ({ x: index / MAX_POINTS_PER_STROKE, y: 0.5 }));
+    for (let index = 0; index < 7; index += 1) {
+      appendStroke(state, "player-1", {
+        id: `stroke-limit-${index}`, tool: "pen", width: 8, points, complete: true,
+      }, 5 + index);
+    }
+    expect(() => appendStroke(state, "player-1", {
+      id: "stroke-limit-overflow", tool: "pen", width: 8, points, complete: true,
+    }, 20)).toThrow("La limite de points pour ce tour est atteinte.");
   });
 });

@@ -5,5 +5,13 @@
   "display": "standalone",
   "background_color": "#0a0c18",
   "theme_color": "#0a0c18",
-  "lang": "fr"
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

@@ -45,10 +45,13 @@ export interface Word {
 }
 
 export interface CurrentTurn {
+  id: string;
   round: number;
   drawerId: string;
   word: Word | null;
   strokes: Stroke[];
+  redoStrokes: Stroke[];
+  pointCount: number;
   startedAt: number | null;
   deadlineAt: number | null;
   revealedAt: number | null;
@@ -81,12 +84,14 @@ export interface RoomState {
   players: Player[];
   sessions: Session[];
   tickets: ConnectionTicket[];
+  turnSequence: number;
   current: CurrentTurn | null;
   usedWordIds: string[];
   finishedWinnerIds: string[];
 }
 
 export interface PublicTurn {
+  id: string;
   round: number;
   drawerId: string;
   drawerName: string;

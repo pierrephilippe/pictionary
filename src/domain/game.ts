@@ -14,6 +14,15 @@ import {
 
 export class GameRuleError extends Error {}
 
+export const MAX_STROKES_PER_TURN = 240;
+export const MAX_POINTS_PER_STROKE = 1_024;
+export const MAX_POINTS_PER_TURN = 8_000;
+
+export interface AppendStrokeResult {
+  deadlineAt: number | null;
+  stroke: Stroke;
+}
+
 export const createRoomState = (code: string, controller: Session, now: number): RoomState => ({
   version: 1,
   code,
@@ -24,6 +33,7 @@ export const createRoomState = (code: string, controller: Session, now: number):
   players: [],
   sessions: [controller],
   tickets: [],
+  turnSequence: 0,
   current: null,
   usedWordIds: [],
   finishedWinnerIds: [],
@@ -58,17 +68,40 @@ const chooseWord = (state: RoomState, random: () => number): Word => {
   return word;
 };
 
-const newTurn = (round: number, drawerId: string): CurrentTurn => ({
+const newTurn = (round: number, drawerId: string, sequence: number): CurrentTurn => ({
+  id: `turn-${sequence}`,
   round,
   drawerId,
   word: null,
   strokes: [],
+  redoStrokes: [],
+  pointCount: 0,
   startedAt: null,
   deadlineAt: null,
   revealedAt: null,
   winnerId: null,
   nextDrawerId: null,
   resolutionPending: false,
+});
+
+const createTurn = (state: RoomState, round: number, drawerId: string): CurrentTurn => {
+  state.turnSequence = (state.turnSequence ?? 0) + 1;
+  return newTurn(round, drawerId, state.turnSequence);
+};
+
+const prepareTurnDrawingState = (turn: CurrentTurn): void => {
+  turn.redoStrokes ??= [];
+  if (!Number.isInteger(turn.pointCount) || turn.pointCount < 0) {
+    turn.pointCount = turn.strokes.reduce((total, stroke) => total + stroke.points.length, 0);
+  }
+};
+
+const normaliseStroke = (stroke: Stroke): Stroke => ({
+  ...structuredClone(stroke),
+  points: stroke.points.map((point) => ({
+    x: Math.round(point.x * 10_000) / 10_000,
+    y: Math.round(point.y * 10_000) / 10_000,
+  })),
 });
 
 export function configure(state: RoomState, settings: Settings, now: number): void {
@@ -94,7 +127,7 @@ export function startGame(state: RoomState, now: number, random: () => number): 
   if (state.phase !== "lobby") throw new GameRuleError("La partie est déjà lancée.");
   if (state.players.length < 2) throw new GameRuleError("Il faut au moins deux joueurs.");
   const drawer = chooseRandom(state.players, random);
-  state.current = newTurn(1, drawer.id);
+  state.current = createTurn(state, 1, drawer.id);
   state.phase = "awaiting_ready";
   state.updatedAt = now;
 }
@@ -113,11 +146,16 @@ export function appendStroke(
   playerId: string,
   stroke: Stroke,
   now: number,
-): number | null {
+): AppendStrokeResult {
   const current = state.current;
   if (!current || current.drawerId !== playerId || !["armed", "drawing"].includes(state.phase)) {
     throw new GameRuleError("Le dessin n’est pas autorisé.");
   }
+  if (current.deadlineAt !== null && now >= current.deadlineAt) {
+    expireTurn(state, now);
+    throw new GameRuleError("Le temps est écoulé.");
+  }
+  prepareTurnDrawingState(current);
   let deadline: number | null = null;
   if (state.phase === "armed") {
     state.phase = "drawing";
@@ -126,16 +164,30 @@ export function appendStroke(
     deadline = current.deadlineAt;
   }
 
-  const existing = current.strokes.find((candidate) => candidate.id === stroke.id);
-  if (existing) {
-    if (existing.tool !== stroke.tool || existing.width !== stroke.width) throw new GameRuleError("Trait invalide.");
-    existing.points.push(...stroke.points);
-    existing.complete ||= stroke.complete;
-  } else {
-    current.strokes.push(structuredClone(stroke));
+  const incoming = normaliseStroke(stroke);
+  const existing = current.strokes.find((candidate) => candidate.id === incoming.id);
+  if (current.pointCount + incoming.points.length > MAX_POINTS_PER_TURN) {
+    throw new GameRuleError("La limite de points pour ce tour est atteinte.");
   }
+  if (existing) {
+    if (existing.complete || existing.tool !== incoming.tool || existing.width !== incoming.width) {
+      throw new GameRuleError("Trait invalide.");
+    }
+    if (existing.points.length + incoming.points.length > MAX_POINTS_PER_STROKE) {
+      throw new GameRuleError("Ce trait contient trop de points.");
+    }
+    existing.points.push(...incoming.points);
+    existing.complete ||= incoming.complete;
+  } else {
+    if (current.strokes.length >= MAX_STROKES_PER_TURN || incoming.points.length > MAX_POINTS_PER_STROKE) {
+      throw new GameRuleError("La limite de traits pour ce tour est atteinte.");
+    }
+    current.strokes.push(incoming);
+    current.redoStrokes = [];
+  }
+  current.pointCount += incoming.points.length;
   state.updatedAt = now;
-  return deadline;
+  return { deadlineAt: deadline, stroke: incoming };
 }
 
 function assertActiveTurn(state: RoomState): CurrentTurn {
@@ -148,14 +200,46 @@ function assertActiveTurn(state: RoomState): CurrentTurn {
 export function undo(state: RoomState, playerId: string, now: number): void {
   const current = assertActiveTurn(state);
   if (current.drawerId !== playerId || state.phase === "revealing") throw new GameRuleError("Action non autorisée.");
-  current.strokes.pop();
+  if (current.deadlineAt !== null && now >= current.deadlineAt) {
+    expireTurn(state, now);
+    throw new GameRuleError("Le temps est écoulé.");
+  }
+  prepareTurnDrawingState(current);
+  const removed = current.strokes.pop();
+  if (removed) {
+    current.redoStrokes.push(removed);
+    current.pointCount -= removed.points.length;
+  }
+  state.updatedAt = now;
+}
+
+export function redo(state: RoomState, playerId: string, now: number): void {
+  const current = assertActiveTurn(state);
+  if (current.drawerId !== playerId || state.phase === "revealing") throw new GameRuleError("Action non autorisée.");
+  if (current.deadlineAt !== null && now >= current.deadlineAt) {
+    expireTurn(state, now);
+    throw new GameRuleError("Le temps est écoulé.");
+  }
+  prepareTurnDrawingState(current);
+  const restored = current.redoStrokes.pop();
+  if (restored) {
+    current.strokes.push(restored);
+    current.pointCount += restored.points.length;
+  }
   state.updatedAt = now;
 }
 
 export function clear(state: RoomState, playerId: string, now: number): void {
   const current = assertActiveTurn(state);
   if (current.drawerId !== playerId || state.phase === "revealing") throw new GameRuleError("Action non autorisée.");
+  if (current.deadlineAt !== null && now >= current.deadlineAt) {
+    expireTurn(state, now);
+    throw new GameRuleError("Le temps est écoulé.");
+  }
+  prepareTurnDrawingState(current);
   current.strokes = [];
+  current.redoStrokes = [];
+  current.pointCount = 0;
   state.updatedAt = now;
 }
 
@@ -167,16 +251,25 @@ function reveal(state: RoomState, now: number): void {
   state.updatedAt = now;
 }
 
-export function expireTurn(state: RoomState, now: number): void {
-  if (state.phase !== "drawing") return;
+export function expireTurn(state: RoomState, now: number): boolean {
+  if (state.phase !== "drawing" || !state.current?.deadlineAt || state.current.deadlineAt > now) return false;
   reveal(state, now);
+  return true;
+}
+
+function beginResolution(state: RoomState, now: number): CurrentTurn {
+  if (!state.current || !["drawing", "revealing"].includes(state.phase)) {
+    throw new GameRuleError("Le résultat ne peut pas encore être validé.");
+  }
+  if (state.phase !== "revealing") reveal(state, now);
+  if (!state.current.resolutionPending) throw new GameRuleError("Le résultat de ce tour est déjà validé.");
+  return state.current;
 }
 
 export function selectWinner(state: RoomState, winnerId: string, now: number): void {
-  const current = assertActiveTurn(state);
+  const current = beginResolution(state, now);
   if (current.drawerId === winnerId) throw new GameRuleError("Le dessinateur ne peut pas gagner son propre tour.");
   getPlayer(state, winnerId);
-  if (state.phase !== "revealing") reveal(state, now);
   const winner = getPlayer(state, winnerId);
   const drawer = getPlayer(state, current.drawerId);
   winner.score += 1;
@@ -188,16 +281,22 @@ export function selectWinner(state: RoomState, winnerId: string, now: number): v
 }
 
 export function selectNoWinner(state: RoomState, now: number, random: () => number): void {
-  const current = assertActiveTurn(state);
-  if (state.phase !== "revealing") reveal(state, now);
+  const current = beginResolution(state, now);
+  current.winnerId = null;
   current.nextDrawerId = chooseRandom(availablePlayers(state, current.drawerId), random).id;
   current.resolutionPending = false;
   state.updatedAt = now;
 }
 
 export function cancelTurn(state: RoomState, now: number): void {
-  const current = assertActiveTurn(state);
-  state.current = newTurn(current.round, current.drawerId);
+  const current = state.current;
+  if (!current || !["awaiting_ready", "armed", "drawing", "revealing"].includes(state.phase)) {
+    throw new GameRuleError("Aucun tour à annuler.");
+  }
+  if (state.phase === "revealing" && !current.resolutionPending) {
+    throw new GameRuleError("Le résultat de ce tour est déjà validé.");
+  }
+  state.current = createTurn(state, current.round, current.drawerId);
   state.phase = "awaiting_ready";
   state.updatedAt = now;
 }
@@ -214,7 +313,7 @@ export function nextTurn(state: RoomState, now: number): void {
     state.updatedAt = now;
     return;
   }
-  state.current = newTurn(current.round + 1, current.nextDrawerId);
+  state.current = createTurn(state, current.round + 1, current.nextDrawerId);
   state.phase = "awaiting_ready";
   state.updatedAt = now;
 }
@@ -236,6 +335,7 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
     settings: structuredClone(state.settings),
     players: structuredClone(state.players),
     turn: current && drawer ? {
+      id: current.id,
       round: current.round,
       drawerId: current.drawerId,
       drawerName: drawer.name,
