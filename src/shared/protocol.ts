@@ -34,6 +34,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("redo") }).merge(turnCommand),
   z.object({ type: z.literal("clear") }).merge(turnCommand),
   z.object({ type: z.literal("select_winner"), playerId: z.string().min(8).max(80) }).merge(turnCommand),
+  z.object({ type: z.literal("no_winner") }).merge(turnCommand),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;

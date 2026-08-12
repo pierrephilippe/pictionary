@@ -9,6 +9,7 @@ import {
   GameRuleError,
   MAX_POINTS_PER_STROKE,
   nextTurn,
+  noWinner,
   redo,
   ready,
   selectWinner,
@@ -19,8 +20,8 @@ import {
 } from "../src/domain/game";
 import type { Player, Session } from "../src/domain/types";
 
-const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0 };
-const terminal: Session = { id: "terminal", token: "terminal-token", role: "terminal", createdAt: 0 };
+const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0, lastSeenAt: 0 };
+const terminal: Session = { id: "terminal", token: "terminal-token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
 const player = (id: string, name: string): Player => ({ id, name, score: 0, joinedAt: 0 });
 const deterministic = (): number => 0;
 
@@ -50,7 +51,7 @@ describe("moteur de jeu", () => {
 
   it("associe le terminal au tour, sans l’associer au joueur", () => {
     const state = startedRoom();
-    const otherTerminal: Session = { id: "other-terminal", token: "token", role: "terminal", createdAt: 0 };
+    const otherTerminal: Session = { id: "other-terminal", token: "token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
 
     expect(() => ready(state, otherTerminal.id, 3, deterministic)).toThrow(GameRuleError);
     expect(snapshotFor(state, terminal, 3).canDraw).toBe(true);
@@ -124,12 +125,27 @@ describe("moteur de jeu", () => {
     expect(state.current?.drawerId).toBe("player-2");
   });
 
+  it("permet au dessinateur de clôturer immédiatement un tour sans gagnant", () => {
+    const state = startedRoom();
+    ready(state, terminal.id, 3, deterministic);
+    appendStroke(state, terminal.id, {
+      id: "stroke-no-winner", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
+    }, 5);
+
+    noWinner(state, terminal.id, 7, deterministic);
+
+    expect(state.phase).toBe("revealing");
+    expect(state.current?.winnerId).toBeNull();
+    expect(state.current?.nextDrawerId).toBe("player-2");
+    expect(state.players.map((candidate) => candidate.score)).toEqual([0, 0]);
+  });
+
   it("ne divulgue le mot qu’au dessinateur avant la révélation", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
     const drawerSession: Session = terminal;
-    const otherSession: Session = { id: "other-session", token: "token", role: "terminal", createdAt: 0 };
-    const controllerSession: Session = { id: "controller-session", token: "token", role: "controller", createdAt: 0 };
+    const otherSession: Session = { id: "other-session", token: "token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
+    const controllerSession: Session = { id: "controller-session", token: "token", role: "controller", createdAt: 0, lastSeenAt: 0 };
     expect(snapshotFor(state, drawerSession, 4).secretWord).toBeTruthy();
     expect(snapshotFor(state, otherSession, 4).secretWord).toBeNull();
     expect(snapshotFor(state, controllerSession, 4).secretWord).toBeNull();

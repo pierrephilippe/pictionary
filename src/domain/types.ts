@@ -67,6 +67,7 @@ export interface Session {
   token: string;
   role: Role;
   createdAt: number;
+  lastSeenAt: number;
 }
 
 export interface ConnectionTicket {

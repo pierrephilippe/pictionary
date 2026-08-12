@@ -98,7 +98,7 @@ h2 { font-size: 1.25rem; }
 .projection-header--hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
 .projection-stage { position: relative; display: grid; width: min(100vw, 1100px); aspect-ratio: 1; margin: auto; background: #000; }
 .projection-stage--pyramid { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
-.projection-stage--vee { grid-template-columns: 1fr 1fr; }
+.projection-stage--vee { grid-template-columns: 1fr 1fr; aspect-ratio: 2 / 1; }
 .projection-stage--single { grid-template-columns: 1fr; width: min(100vw, 900px); aspect-ratio: 16 / 9; }
 .projection-copy { position: relative; display: grid; min-width: 0; min-height: 0; overflow: hidden; transform: rotate(var(--rotation)); transform-origin: center; background: #000; }
 .hologram-canvas { width: 100%; height: 100%; background: #000; }
@@ -110,6 +110,14 @@ h2 { font-size: 1.25rem; }
 .calibration-corner { position: absolute; padding: .6rem; color: #bfa4ff; font-size: clamp(1rem, 5vw, 3rem); }
 .calibration-corner--one { top: 0; left: 0; }.calibration-corner--two { top: 0; right: 0; }.calibration-corner--three { right: 0; bottom: 0; }.calibration-corner--four { bottom: 0; left: 0; }
 .projection-help { margin: 0; padding: .55rem 1rem; color: #7f7d8f; text-align: center; font-size: .75rem; background: #090909; }
+.projection-screen--immersive { height: 100dvh; min-height: 100dvh; grid-template-rows: 1fr; }
+.projection-screen--immersive .projection-help { display: none; }
+.projection-screen--immersive .projection-stage { width: min(100vw, 100dvh, 1100px); }
+.projection-screen--immersive .projection-stage--vee { width: min(100vw, 200dvh, 1100px); }
+.projection-screen--immersive .projection-stage--single { width: min(100vw, 177.78dvh, 900px); }
+.projection-exit { position: fixed; right: .75rem; bottom: .75rem; z-index: 11; padding: .45rem .65rem; color: #d7d2e6; background: #161827bb; font-size: .68rem; opacity: .3; }
+.projection-exit:focus-visible, .projection-exit:hover { opacity: 1; }
+.projection-immersive .connection-banner, .projection-immersive .leave-button { display: none; }
 
 .connection-banner { position: fixed; top: 0; right: 0; z-index: 10; padding: .35rem .65rem; border-radius: 0 0 0 .6rem; color: #14221a; background: #9cf4bd; font-size: .7rem; font-weight: 800; }
 .connection-banner.is-offline { color: #421925; background: #ffbdcc; }

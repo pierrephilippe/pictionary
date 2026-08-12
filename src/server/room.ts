@@ -9,6 +9,7 @@ import {
   expireTurn,
   GameRuleError,
   nextTurn,
+  noWinner,
   READY_DURATION_MS,
   REVEAL_DURATION_MS,
   ready,
@@ -32,10 +33,13 @@ interface CreateRoomInput {
   controllerToken: string;
 }
 
-interface JoinResult { token: string; }
+type JoinResult = { token: string } | { error: string };
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const TICKET_TTL_MS = 60 * 1000;
+const TERMINAL_SESSION_IDLE_MS = 30 * 60 * 1000;
+const MAX_TERMINAL_SESSIONS = 16;
+const MAX_ROOM_SOCKETS = 20;
 
 const asErrorMessage = (error: unknown): string => error instanceof GameRuleError
   ? error.message
@@ -73,6 +77,7 @@ export class GameRoom extends DurableObject {
       token: input.controllerToken,
       role: "controller",
       createdAt: now,
+      lastSeenAt: now,
     };
     this.state = createRoomState(input.code, controller, now);
     this.persist();
@@ -82,18 +87,27 @@ export class GameRoom extends DurableObject {
   async join(input: JoinRoomRequest): Promise<JoinResult> {
     const state = this.requireState();
     const now = Date.now();
+    const pruned = this.pruneInactiveTerminalSessions(state, now);
+    if (state.sessions.filter((session) => session.role === "terminal").length >= MAX_TERMINAL_SESSIONS) {
+      if (pruned) {
+        state.updatedAt = now;
+        this.persist();
+        await this.scheduleNextAlarm();
+      }
+      return { error: "La limite de téléphones terminaux est atteinte." };
+    }
     const token = randomId();
     const session: Session = {
       id: randomId(),
       token,
       role: input.role,
       createdAt: now,
+      lastSeenAt: now,
     };
     state.sessions.push(session);
     state.updatedAt = now;
     this.persist();
     await this.scheduleNextAlarm();
-    this.broadcast();
     return { token };
   }
 
@@ -101,9 +115,10 @@ export class GameRoom extends DurableObject {
     const state = this.requireState();
     const session = this.getSessionByToken(token);
     const now = Date.now();
-    state.tickets = state.tickets.filter((candidate) => candidate.expiresAt > now);
+    state.tickets = state.tickets.filter((candidate) => candidate.expiresAt > now && candidate.sessionId !== session.id);
     const ticket = randomId();
     state.tickets.push({ value: ticket, sessionId: session.id, expiresAt: now + TICKET_TTL_MS });
+    session.lastSeenAt = now;
     state.updatedAt = now;
     this.persist();
     await this.scheduleNextAlarm();
@@ -120,15 +135,19 @@ export class GameRoom extends DurableObject {
     const ticketValue = url.searchParams.get("ticket");
     const ticket = state.tickets.find((candidate) => candidate.value === ticketValue && candidate.expiresAt > now);
     if (!ticket) return new Response("Invalid connection ticket", { status: 401 });
+    if (this.ctx.getWebSockets().length >= MAX_ROOM_SOCKETS) {
+      return new Response("Room connection limit reached", { status: 429 });
+    }
     state.tickets = state.tickets.filter((candidate) => candidate.value !== ticket.value);
     state.updatedAt = now;
+    const session = this.getSession(ticket.sessionId);
+    session.lastSeenAt = now;
     this.persist();
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ sessionId: ticket.sessionId } satisfies SocketAttachment);
-    const session = this.getSession(ticket.sessionId);
     this.sendSnapshot(server, session);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -235,7 +254,9 @@ export class GameRoom extends DurableObject {
       case "stroke": {
         requireCurrentTurn(command.turnId);
         const result = appendStroke(state, requireTerminal(), command.stroke, now);
-        strokeDelta = result.stroke;
+        // The first trait changes phase and starts the deadline. A snapshot is
+        // required so every device receives those authoritative fields.
+        if (result.deadlineAt === null) strokeDelta = result.stroke;
         shouldScheduleAlarm = result.deadlineAt !== null;
         break;
       }
@@ -257,6 +278,10 @@ export class GameRoom extends DurableObject {
       case "select_winner":
         requireCurrentTurn(command.turnId);
         selectWinner(state, requireTerminal(), command.playerId, now);
+        break;
+      case "no_winner":
+        requireCurrentTurn(command.turnId);
+        noWinner(state, requireTerminal(), now, secureRandom);
         break;
       default:
         command satisfies never;
@@ -305,6 +330,22 @@ export class GameRoom extends DurableObject {
     return session;
   }
 
+  private pruneInactiveTerminalSessions(state: RoomState, now: number): boolean {
+    const activeSessionIds = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+      if (attachment) activeSessionIds.add(attachment.sessionId);
+    }
+    const previousCount = state.sessions.length;
+    state.sessions = state.sessions.filter((session) => session.role !== "terminal"
+      || activeSessionIds.has(session.id)
+      || session.lastSeenAt + TERMINAL_SESSION_IDLE_MS > now);
+    if (state.sessions.length === previousCount) return false;
+    const sessionIds = new Set(state.sessions.map((session) => session.id));
+    state.tickets = state.tickets.filter((ticket) => sessionIds.has(ticket.sessionId));
+    return true;
+  }
+
   private getState(): RoomState | null {
     if (!this.state) this.state = this.readState();
     return this.state;
@@ -325,6 +366,7 @@ export class GameRoom extends DurableObject {
     for (const legacySession of persistedSessions) {
       if (legacySession.role === "player") legacySession.role = "terminal";
       delete legacySession.playerId;
+      legacySession.lastSeenAt ??= legacySession.createdAt;
     }
     if (state.current) {
       state.current.id ??= `legacy-turn-${state.current.round}`;

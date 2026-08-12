@@ -312,6 +312,15 @@ export function selectWinner(state: RoomState, terminalSessionId: string, winner
   reveal(state, now);
 }
 
+export function noWinner(state: RoomState, terminalSessionId: string, now: number, random: () => number): void {
+  const current = state.current;
+  if (state.phase !== "drawing" || !current) throw new GameRuleError("Le tour n’est plus en cours.");
+  assertDrawerTerminal(state, terminalSessionId);
+  current.winnerId = null;
+  current.nextDrawerId = chooseNextDrawer(state, current.drawerId, random).id;
+  reveal(state, now);
+}
+
 export function expireTurn(state: RoomState, now: number, random: () => number = () => 0): boolean {
   if (state.phase !== "drawing" || !state.current?.deadlineAt || state.current.deadlineAt > now) return false;
   state.current.winnerId = null;

@@ -159,14 +159,19 @@ const formatTime = (milliseconds: number): string => {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 };
 
-function Timer({ deadlineAt, large = false }: { deadlineAt: number | null; large?: boolean }) {
+function Timer({ deadlineAt, serverNow, large = false }: { deadlineAt: number | null; serverNow: number; large?: boolean }) {
   const [now, setNow] = useState(Date.now());
+  const [serverOffset, setServerOffset] = useState(() => serverNow - Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    setServerOffset(serverNow - Date.now());
+  }, [serverNow]);
   useEffect(() => {
     if (!deadlineAt) return undefined;
     const timer = window.setInterval(() => setNow(Date.now()), 200);
     return () => window.clearInterval(timer);
   }, [deadlineAt]);
-  return <span className={`timer${large ? " timer--large" : ""}`}>{deadlineAt ? formatTime(deadlineAt - now) : "--:--"}</span>;
+  return <span className={`timer${large ? " timer--large" : ""}`}>{deadlineAt ? formatTime(deadlineAt - (now + serverOffset)) : "--:--"}</span>;
 }
 
 function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
@@ -371,11 +376,11 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
         <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} prépare son dessin` : "La partie se prépare"}</h1><p>Ce tour utilise déjà un autre téléphone.</p></section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && isDrawer ? (
-        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} />.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
+        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
       ) : null}
       {["armed", "drawing"].includes(snapshot.phase) && isDrawer ? (
         <>
-          <section className="secret-word"><span>Votre mot secret</span><strong>{snapshot.secretWord}</strong>{snapshot.phase === "armed" ? <p>Le chronomètre démarre à votre premier trait. Commencez avant <Timer deadlineAt={turn?.armedDeadlineAt ?? null} />.</p> : <Timer deadlineAt={turn?.deadlineAt ?? null} large />}</section>
+          <section className="secret-word"><span>Votre mot secret</span><strong>{snapshot.secretWord}</strong>{snapshot.phase === "armed" ? <p>Le chronomètre démarre à votre premier trait. Commencez avant <Timer deadlineAt={turn?.armedDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p> : <Timer deadlineAt={turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} large />}</section>
           <DrawingBoard snapshot={snapshot} send={send} />
         </>
       ) : null}
@@ -389,7 +394,7 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
 function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const turn = snapshot.turn;
   if (!turn) return null;
-  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Le dessinateur valide la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}</div></section>;
+  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Le dessinateur valide la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}<button onClick={() => send({ type: "no_winner", turnId: turn.id })}>Personne n’a trouvé</button></div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -458,31 +463,72 @@ function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
 function ProjectionScreen({ snapshot }: { snapshot: RoomSnapshot }) {
   const [layout, setLayout] = useState<ProjectionLayout>("pyramid");
   const [calibration, setCalibration] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const presentationMode = immersive || nativeFullscreen;
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
     if ("wakeLock" in navigator) void (navigator as Navigator & { wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock.request("screen").then((lock) => { wakeLock = lock; }).catch(() => undefined);
     return () => void wakeLock?.release();
   }, []);
+  useEffect(() => {
+    const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null };
+    const syncFullscreen = (): void => {
+      const active = Boolean(document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement);
+      setNativeFullscreen(active);
+      if (!active) setImmersive(false);
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    document.addEventListener("webkitfullscreenchange", syncFullscreen);
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+      document.removeEventListener("webkitfullscreenchange", syncFullscreen);
+    };
+  }, []);
+  useEffect(() => {
+    document.documentElement.classList.toggle("projection-immersive", presentationMode);
+    return () => document.documentElement.classList.remove("projection-immersive");
+  }, [presentationMode]);
   const enterFullscreen = async (): Promise<void> => {
+    // iOS Safari may not expose the Fullscreen API for documents. The CSS mode
+    // still removes app chrome and uses the entire visible viewport in that case.
+    setImmersive(true);
+    const fullscreenElement = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> };
+    const requestFullscreen = fullscreenElement.requestFullscreen?.bind(fullscreenElement) ?? fullscreenElement.webkitRequestFullscreen?.bind(fullscreenElement);
     try {
-      await document.documentElement.requestFullscreen();
-      setFullscreen(true);
+      await requestFullscreen?.();
+    } catch {
+      // Keep the CSS presentation fallback active.
+    }
+    try {
       const orientation = screen.orientation as ScreenOrientation & { lock?: (orientation: string) => Promise<void> };
       await orientation.lock?.("landscape");
     } catch {
-      setFullscreen(false);
+      // Orientation locking is not available on several mobile browsers.
     }
   };
-  const copies = layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [0, 180] : [0];
-  return <main className="projection-screen">
-    <header className={`projection-header${fullscreen ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls"><label>Support <select value={layout} onChange={(event) => setLayout(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label><button onClick={() => setCalibration((value) => !value)}>{calibration ? "Voir le jeu" : "Mire"}</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
+  const exitFullscreen = async (): Promise<void> => {
+    setImmersive(false);
+    const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> };
+    const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
+    try {
+      await exit?.();
+    } catch {
+      // The fallback only changes local presentation styles.
+    }
+  };
+  // In a V support, each half of the display reflects into a lateral face.
+  // The views therefore point away from the shared ridge (left: 90°, right: 270°).
+  const copies = layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0];
+  return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}`}>
+    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PRISME</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls"><label>Support <select value={layout} onChange={(event) => setLayout(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label><button onClick={() => setCalibration((value) => !value)}>{calibration ? "Voir le jeu" : "Mire"}</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
     <section className={`projection-stage projection-stage--${layout}`}>
       {copies.map((rotation, index) => <div key={rotation} className="projection-copy" style={{ "--rotation": `${rotation}deg` } as React.CSSProperties}>
-        {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
+        {calibration ? <CalibrationMark number={index + 1} /> : <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></>}
       </div>)}
     </section>
     <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p>
+    {presentationMode ? <button className="projection-exit" onClick={() => void exitFullscreen()}>Quitter le plein écran</button> : null}
   </main>;
 }
 

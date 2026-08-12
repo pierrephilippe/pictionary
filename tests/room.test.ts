@@ -105,7 +105,7 @@ describe("Worker et Durable Object de salle", () => {
 
     expect((await send(drawerSocket, { type: "take_drawing_turn", turnId }, (message) => message.type === "snapshot" && message.snapshot?.canDraw === true)).snapshot?.canDraw).toBe(true);
     expect((await send(drawerSocket, { type: "ready", turnId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "armed")).snapshot?.phase).toBe("armed");
-    const stroke = await send(drawerSocket, {
+    const drawing = await send(drawerSocket, {
       type: "stroke",
       turnId,
       stroke: {
@@ -115,11 +115,14 @@ describe("Worker et Durable Object de salle", () => {
         points: [{ x: 0.1, y: 0.1 }, { x: 0.2, y: 0.2 }],
         complete: true,
       },
-    }, (message) => message.type === "stroke_delta");
-    expect(stroke.type).toBe("stroke_delta");
+    }, (message) => message.type === "snapshot" && message.snapshot?.phase === "drawing");
+    expect(drawing.snapshot?.turn?.deadlineAt).toBeTruthy();
 
     const otherTerminalWinner = await send(secondSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "error");
     expect(otherTerminalWinner).toMatchObject({ type: "error", message: "Ce téléphone n’est pas le terminal de dessin de ce tour." });
+
+    const otherTerminalNoWinner = await send(secondSocket, { type: "no_winner", turnId }, (message) => message.type === "error");
+    expect(otherTerminalNoWinner).toMatchObject({ type: "error", message: "Ce téléphone n’est pas le terminal de dessin de ce tour." });
 
     const resolved = await send(drawerSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "revealing");
     expect(resolved.snapshot?.phase).toBe("revealing");
@@ -132,5 +135,30 @@ describe("Worker et Durable Object de salle", () => {
     controllerSocket.close();
     firstSocket.close();
     secondSocket.close();
+  });
+
+  it("borne le nombre de terminaux persistés dans une salle", async () => {
+    const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    for (let index = 0; index < 16; index += 1) {
+      const response = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "terminal" }),
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const rejected = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    expect(rejected.status).toBe(429);
+    await expect(json<{ error: string }>(rejected)).resolves.toEqual({ error: "La limite de téléphones terminaux est atteinte." });
   });
 });

@@ -76,6 +76,7 @@ export default {
       if (request.method === "POST" && action === "join") {
         const input = joinRoomSchema.parse(await readJson<JoinRoomRequest>(request));
         const result = await stub.join(input);
+        if ("error" in result) return errorResponse(result.error, 429);
         return json({ code, token: result.token, role: input.role }, { status: 201 });
       }
 
