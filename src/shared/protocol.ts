@@ -25,25 +25,20 @@ const turnCommand = z.object({ turnId: z.string().min(6).max(80) });
 
 export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("configure"), settings: settingsSchema }),
+  z.object({ type: z.literal("add_player"), name: z.string().trim().min(2).max(24) }),
   z.object({ type: z.literal("start_game") }),
+  z.object({ type: z.literal("take_drawing_turn") }).merge(turnCommand),
   z.object({ type: z.literal("ready") }).merge(turnCommand),
   z.object({ type: z.literal("stroke"), stroke: strokeSchema }).merge(turnCommand),
   z.object({ type: z.literal("undo") }).merge(turnCommand),
   z.object({ type: z.literal("redo") }).merge(turnCommand),
   z.object({ type: z.literal("clear") }).merge(turnCommand),
   z.object({ type: z.literal("select_winner"), playerId: z.string().min(8).max(80) }).merge(turnCommand),
-  z.object({ type: z.literal("no_winner") }).merge(turnCommand),
-  z.object({ type: z.literal("next_turn") }).merge(turnCommand),
-  z.object({ type: z.literal("cancel_turn") }).merge(turnCommand),
-  z.object({ type: z.literal("end_game") }),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 export const createRoomSchema = z.object({}).passthrough();
-export const joinRoomSchema = z.discriminatedUnion("role", [
-  z.object({ role: z.literal("player"), name: z.string().trim().min(2).max(24) }),
-  z.object({ role: z.literal("projection") }),
-]);
+export const joinRoomSchema = z.object({ role: z.literal("terminal") });
 
 export type JoinRoomRequest = z.infer<typeof joinRoomSchema>;

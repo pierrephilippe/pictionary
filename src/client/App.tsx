@@ -19,8 +19,7 @@ import type { ClientCommand, JoinRoomRequest } from "../shared/protocol";
 interface StoredSession {
   code: string;
   token: string;
-  role: "controller" | "player" | "projection";
-  playerId?: string;
+  role: "controller" | "terminal";
 }
 
 interface ApiError {
@@ -52,7 +51,8 @@ const saveSession = (session: StoredSession | null): void => {
 const loadSession = (): StoredSession | null => {
   try {
     const value = localStorage.getItem(ACTIVE_SESSION_KEY);
-    return value ? JSON.parse(value) as StoredSession : null;
+    const session = value ? JSON.parse(value) as StoredSession : null;
+    return session?.role === "controller" || session?.role === "terminal" ? session : null;
   } catch {
     return null;
   }
@@ -357,29 +357,39 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
   );
 }
 
-function PlayerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const isDrawer = snapshot.canDraw;
   const turn = snapshot.turn;
   return (
     <main className="role-screen player-screen">
-      <RoomHeader snapshot={snapshot} label="Joueur" />
+      <RoomHeader snapshot={snapshot} label="Terminal de dessin" />
       {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
-      {snapshot.phase !== "finished" && !isDrawer ? (
-        <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} dessine` : "La partie se prépare"}</h1><p>Regardez le prisme et devinez à voix haute.</p>{turn?.deadlineAt ? <Timer deadlineAt={turn.deadlineAt} large /> : null}</section>
+      {snapshot.phase === "awaiting_ready" && snapshot.canTakeDrawingTurn && turn ? (
+        <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez son tour.</p><button className="button button--primary" onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
+      ) : null}
+      {snapshot.phase === "awaiting_ready" && !isDrawer && !snapshot.canTakeDrawingTurn ? (
+        <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} prépare son dessin` : "La partie se prépare"}</h1><p>Ce tour utilise déjà un autre téléphone.</p></section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && isDrawer ? (
-        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
+        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} />.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
       ) : null}
       {["armed", "drawing"].includes(snapshot.phase) && isDrawer ? (
         <>
-          <section className="secret-word"><span>Votre mot secret</span><strong>{snapshot.secretWord}</strong>{snapshot.phase === "armed" ? <p>Le chronomètre démarre à votre premier trait.</p> : <Timer deadlineAt={turn?.deadlineAt ?? null} large />}</section>
+          <section className="secret-word"><span>Votre mot secret</span><strong>{snapshot.secretWord}</strong>{snapshot.phase === "armed" ? <p>Le chronomètre démarre à votre premier trait. Commencez avant <Timer deadlineAt={turn?.armedDeadlineAt ?? null} />.</p> : <Timer deadlineAt={turn?.deadlineAt ?? null} large />}</section>
           <DrawingBoard snapshot={snapshot} send={send} />
         </>
       ) : null}
+      {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <WinnerSelection snapshot={snapshot} send={send} /> : null}
       {snapshot.phase === "revealing" ? <Reveal snapshot={snapshot} /> : null}
       <Scoreboard snapshot={snapshot} />
     </main>
   );
+}
+
+function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+  const turn = snapshot.turn;
+  if (!turn) return null;
+  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Le dessinateur valide la première bonne réponse entendue.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}</div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -395,6 +405,7 @@ function ToggleList<T extends string>({
 
 function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
   const [settings, setSettings] = useState<Settings>(snapshot.settings);
+  const [playerName, setPlayerName] = useState("");
   useEffect(() => {
     if (snapshot.phase === "lobby") setSettings(snapshot.settings);
   }, [snapshot.phase, snapshot.settings]);
@@ -406,45 +417,28 @@ function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (c
     });
   };
   const joinUrl = `${window.location.origin}?join=${snapshot.code}`;
-  const turn = snapshot.turn;
   return (
     <main className="role-screen controller-screen">
-      <RoomHeader snapshot={snapshot} label="Contrôle de jeu" />
-      {snapshot.phase === "lobby" ? (
-        <>
-          <section className="join-card">
-            <div><p className="eyebrow">Salle</p><h1>{snapshot.code}</h1><p>Scannez le QR code ou saisissez le code depuis les téléphones joueurs et le projecteur.</p></div>
-            <QRCodeSVG value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin />
-          </section>
-          <section className="settings-card">
-            <h2>Réglages de la partie</h2>
-            <label>Durée <select value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label>
-            <label>Nombre de tours <select value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} tours</option>)}</select></label>
-            <h3>Thèmes</h3>
-            <ToggleList values={THEMES} selected={settings.themes} toggle={(value) => toggle("themes", value)} label={(value) => ({ animaux: "Animaux", objets: "Objets", alimentation: "Alimentation", lieux: "Lieux", metiers: "Métiers" })[value]} />
-            <h3>Difficulté</h3>
-            <ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={(value) => toggle("difficulties", value)} label={(value) => value[0]!.toUpperCase() + value.slice(1)} />
-            <div className="button-row"><button onClick={() => send({ type: "configure", settings })}>Enregistrer</button><button className="button button--primary" disabled={snapshot.players.length < 2 || settings.themes.length === 0 || settings.difficulties.length === 0} onClick={() => { send({ type: "configure", settings }); send({ type: "start_game" }); }}>Lancer la partie</button></div>
-          </section>
-          <Participants snapshot={snapshot} />
-        </>
-      ) : null}
-      {snapshot.phase === "awaiting_ready" && turn ? <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit se préparer</h1><p>Le mot apparaîtra sur son téléphone, puis le premier trait lancera le temps.</p><button onClick={() => send({ type: "cancel_turn", turnId: turn.id })}>Changer ce tour</button></section> : null}
-      {["armed", "drawing"].includes(snapshot.phase) && turn ? <section className="control-turn"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} dessine</h1>{turn.deadlineAt ? <Timer deadlineAt={turn.deadlineAt} large /> : <p>Le chronomètre démarrera au premier trait.</p>}<ResolutionControls snapshot={snapshot} send={send} /><button onClick={() => send({ type: "cancel_turn", turnId: turn.id })}>Annuler ce tour</button></section> : null}
-      {snapshot.phase === "revealing" ? <><Reveal snapshot={snapshot} /><ResolutionControls snapshot={snapshot} send={send} /></> : null}
-      {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
-      {snapshot.phase !== "lobby" ? <><Participants snapshot={snapshot} /><button className="end-game" onClick={() => send({ type: "end_game" })}>Terminer la partie</button></> : null}
+      <RoomHeader snapshot={snapshot} label="Préparation" />
+      <section className="join-card">
+        <div><p className="eyebrow">Salle</p><h1>{snapshot.code}</h1><p>Scannez le QR code depuis les téléphones terminaux. Cet écran devient la projection au lancement.</p></div>
+        <QRCodeSVG value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin />
+      </section>
+      <section className="settings-card">
+        <h2>Joueurs</h2>
+        <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; send({ type: "add_player", name: playerName }); setPlayerName(""); }}><label>Nom du joueur<input value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
+        <Participants snapshot={snapshot} />
+        <h2>Réglages de la partie</h2>
+        <label>Durée <select value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label>
+        <label>Nombre de tours <select value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} tours</option>)}</select></label>
+        <h3>Thèmes</h3>
+        <ToggleList values={THEMES} selected={settings.themes} toggle={(value) => toggle("themes", value)} label={(value) => ({ animaux: "Animaux", objets: "Objets", alimentation: "Alimentation", lieux: "Lieux", metiers: "Métiers" })[value]} />
+        <h3>Difficulté</h3>
+        <ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={(value) => toggle("difficulties", value)} label={(value) => value[0]!.toUpperCase() + value.slice(1)} />
+        <div className="button-row"><button onClick={() => send({ type: "configure", settings })}>Enregistrer</button><button className="button button--primary" disabled={snapshot.players.length < 1 || settings.themes.length === 0 || settings.difficulties.length === 0} onClick={() => { send({ type: "configure", settings }); send({ type: "start_game" }); }}>Lancer la partie</button></div>
+      </section>
     </main>
   );
-}
-
-function ResolutionControls({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
-  const turn = snapshot.turn;
-  if (!turn) return null;
-  if (!snapshot.controllerResolutionPending) {
-    return snapshot.phase === "revealing" ? <button className="button button--primary" onClick={() => send({ type: "next_turn", turnId: turn.id })}>{turn.round >= snapshot.settings.rounds ? "Voir les gagnants" : "Tour suivant"}</button> : null;
-  }
-  return <section className="resolution"><h2>Qui a trouvé ?</h2><p>Validez selon les réponses entendues.</p><div className="button-row">{snapshot.players.filter((player) => player.id !== turn.drawerId).map((player) => <button key={player.id} onClick={() => send({ type: "select_winner", turnId: turn.id, playerId: player.id })}>{player.name}</button>)}<button onClick={() => send({ type: "no_winner", turnId: turn.id })}>Personne</button></div></section>;
 }
 
 function Participants({ snapshot }: { snapshot: RoomSnapshot }) {
@@ -453,7 +447,7 @@ function Participants({ snapshot }: { snapshot: RoomSnapshot }) {
 
 function Reveal({ snapshot }: { snapshot: RoomSnapshot }) {
   const winner = snapshot.players.find((player) => player.id === snapshot.turn?.winnerId);
-  return <section className="reveal-card"><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? `${winner.name} dessine au prochain tour.` : "Le prochain dessinateur a été tiré au sort."}</p></section>;
+  return <section className="reveal-card"><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? `${winner.name} a trouvé : +1 point pour lui et pour le dessinateur.` : "Personne n’a trouvé : le prochain dessinateur a été tiré au sort."}</p></section>;
 }
 
 function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
@@ -463,7 +457,7 @@ function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
 
 function ProjectionScreen({ snapshot }: { snapshot: RoomSnapshot }) {
   const [layout, setLayout] = useState<ProjectionLayout>("pyramid");
-  const [calibration, setCalibration] = useState(true);
+  const [calibration, setCalibration] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
@@ -503,8 +497,6 @@ function RoomHeader({ snapshot, label }: { snapshot: RoomSnapshot; label: string
 function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
   const initialCode = normaliseCode(new URLSearchParams(window.location.search).get("join") ?? "");
   const [code, setCode] = useState(initialCode);
-  const [name, setName] = useState("");
-  const [role, setRole] = useState<"player" | "projection">("player");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const create = async (): Promise<void> => {
@@ -517,12 +509,12 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
   const join = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault(); setBusy(true); setError(null);
     try {
-      const payload: JoinRoomRequest = role === "player" ? { role, name } : { role };
+      const payload: JoinRoomRequest = { role: "terminal" };
       const result = await request<StoredSession>(`/api/rooms/${normaliseCode(code)}/join`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
       onSession(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Connexion impossible."); } finally { setBusy(false); }
   };
-  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Un écran de projection, un contrôleur et vos téléphones : la partie prend vie dans le plexiglas.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie</button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><div className="role-tabs"><button className={role === "player" ? "selected" : ""} onClick={() => setRole("player")}>Je suis joueur</button><button className={role === "projection" ? "selected" : ""} onClick={() => setRole("projection")}>Je suis le projecteur</button></div><form onSubmit={join}><label>Code de salle<input value={code} placeholder="ABC123" maxLength={6} onChange={(event) => setCode(normaliseCode(event.target.value))} /></label>{role === "player" ? <label>Votre pseudo<input value={name} placeholder="ex. Lila" maxLength={24} onChange={(event) => setName(event.target.value)} /></label> : <p className="subtle">Choisissez ensuite le support holographique et la mire de calibrage.</p>}<button className="button button--primary" disabled={busy || code.length !== 6 || (role === "player" && name.trim().length < 2)}>{busy ? "Connexion…" : "Rejoindre"}</button></form>{error ? <p className="error-message">{error}</p> : null}</section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PRISME</span><p className="eyebrow">Pictionary holographique</p><h1>Dessinez. Devinez.<br />Faites apparaître le jeu.</h1><p>Créez la partie sur le téléphone qui servira de projection. Le téléphone principal inscrit les joueurs, tandis que les autres téléphones sont des terminaux de dessin.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer une partie</button></section><section className="join-panel"><p className="eyebrow">Rejoindre une partie</p><form onSubmit={join}><label>Code de salle<input value={code} placeholder="ABC123" maxLength={6} onChange={(event) => setCode(normaliseCode(event.target.value))} /></label><p className="subtle">Ce téléphone pourra être confié au dessinateur désigné à chaque tour.</p><button className="button button--primary" disabled={busy || code.length !== 6}>{busy ? "Connexion…" : "Rejoindre comme terminal"}</button></form>{error ? <p className="error-message">{error}</p> : null}</section></main>;
 }
 
 export function App() {
@@ -532,5 +524,5 @@ export function App() {
   const leave = (): void => { saveSession(null); setSession(null); };
   if (!session) return <Home onSession={adoptSession} />;
   if (!snapshot) return <main className="loading"><span className="brand">PRISME</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main>;
-  return <><div className={`connection-banner${connected ? "" : " is-offline"}`}>{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{session.role === "controller" ? <ControllerScreen snapshot={snapshot} send={send} /> : null}{session.role === "player" ? <PlayerScreen snapshot={snapshot} send={send} /> : null}{session.role === "projection" ? <ProjectionScreen snapshot={snapshot} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
+  return <><div className={`connection-banner${connected ? "" : " is-offline"}`}>{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
 }

@@ -5,7 +5,7 @@ export const ROUND_COUNTS = [5, 10, 15] as const;
 
 export type Theme = (typeof THEMES)[number];
 export type Difficulty = (typeof DIFFICULTIES)[number];
-export type Role = "controller" | "player" | "projection";
+export type Role = "controller" | "terminal";
 export type ProjectionLayout = "pyramid" | "vee" | "single";
 export type GamePhase = "lobby" | "awaiting_ready" | "armed" | "drawing" | "revealing" | "finished";
 export type Tool = "pen" | "eraser";
@@ -52,19 +52,20 @@ export interface CurrentTurn {
   strokes: Stroke[];
   redoStrokes: Stroke[];
   pointCount: number;
+  readyDeadlineAt: number;
+  armedDeadlineAt: number | null;
   startedAt: number | null;
   deadlineAt: number | null;
   revealedAt: number | null;
   winnerId: string | null;
   nextDrawerId: string | null;
-  resolutionPending: boolean;
+  drawerTerminalSessionId: string | null;
 }
 
 export interface Session {
   id: string;
   token: string;
   role: Role;
-  playerId?: string;
   createdAt: number;
 }
 
@@ -95,12 +96,13 @@ export interface PublicTurn {
   round: number;
   drawerId: string;
   drawerName: string;
+  readyDeadlineAt: number;
+  armedDeadlineAt: number | null;
   deadlineAt: number | null;
   revealedWord: string | null;
   strokes: Stroke[];
   winnerId: string | null;
   nextDrawerId: string | null;
-  resolutionPending: boolean;
 }
 
 export interface RoomSnapshot {
@@ -110,9 +112,9 @@ export interface RoomSnapshot {
   players: Player[];
   turn: PublicTurn | null;
   canDraw: boolean;
+  canTakeDrawingTurn: boolean;
+  canSelectWinner: boolean;
   secretWord: string | null;
-  isController: boolean;
-  controllerResolutionPending: boolean;
   finishedWinnerIds: string[];
   serverNow: number;
 }

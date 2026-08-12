@@ -1,6 +1,6 @@
 # Prisme — Pictionary holographique
 
-PWA multijoueur pour une projection type Pepper’s ghost : un téléphone affiche le prisme, un autre contrôle la partie et les joueurs dessinent depuis leurs téléphones.
+PWA multijoueur pour une projection type Pepper’s ghost : le téléphone qui crée la salle devient l’écran du prisme au lancement. Les joueurs sont inscrits sur ce téléphone principal ; les autres téléphones servent uniquement de terminaux de dessin interchangeables.
 
 ## Prérequis
 
@@ -14,7 +14,7 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://localhost:8787`. Le contrôleur crée une salle, les joueurs et le projecteur rejoignent avec le QR code ou le code court affiché.
+Ouvrir ensuite `http://localhost:8787`. Sur le téléphone de projection, créer une salle, inscrire les joueurs, puis faire rejoindre les téléphones terminaux avec le QR code ou le code court affiché. Au lancement, cet écran passe automatiquement en mode projection.
 
 `npm run dev:ui` démarre uniquement Vite : il sert au travail visuel, mais le jeu temps réel nécessite `npm run dev`.
 
@@ -48,6 +48,8 @@ Avant le premier déclenchement, créer dans GitHub (`Settings` → `Secrets and
 
 La règle de branche GitHub doit exiger une pull request pour `main` si l’on veut que les déploiements proviennent exclusivement de merges, et non de pushes directs.
 
-## Projection
+## Déroulé et projection
 
-Le projecteur choisit une mire pour pyramide (4 faces), plexiglas en V (2 faces) ou plaque simple (1 face). Pour de meilleurs résultats, mettre l’écran à luminosité maximale, activer le plein écran et centrer le plexiglas sur la mire.
+Une partie peut inclure un seul joueur. À chaque tour, donnez n’importe quel téléphone terminal au dessinateur désigné : il démarre son tour, dessine puis sélectionne dans la liste le joueur qui a trouvé. Le gagnant et le dessinateur gagnent chacun un point. Sans validation avant la fin du chronomètre, personne ne marque. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes ; le mot reste révélé cinq secondes, puis le tour suivant commence automatiquement.
+
+Le téléphone créateur choisit une mire pour pyramide (4 faces), plexiglas en V (2 faces) ou plaque simple (1 face). Pour de meilleurs résultats, mettre l’écran à luminosité maximale, activer le plein écran et centrer le plexiglas sur la mire.

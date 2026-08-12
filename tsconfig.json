@@ -14,7 +14,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["vitest/globals", "@cloudflare/vitest-pool-workers"]
+    "types": ["vitest/globals", "@cloudflare/vitest-pool-workers/types"]
   },
   "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"]
 }

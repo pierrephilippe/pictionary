@@ -5,7 +5,6 @@ import type { RoomSnapshot } from "../src/domain/types";
 interface SessionResponse {
   code: string;
   token: string;
-  playerId?: string;
 }
 
 interface ServerMessage {
@@ -63,7 +62,7 @@ const send = async (
 };
 
 describe("Worker et Durable Object de salle", () => {
-  it("applique les rôles et refuse une seconde validation de résultat", async () => {
+  it("sépare joueurs et terminaux, et laisse le dessinateur valider le gagnant", async () => {
     const roomResponse = await SELF.fetch("https://example.test/api/rooms", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -72,43 +71,43 @@ describe("Worker et Durable Object de salle", () => {
     expect(roomResponse.status).toBe(201);
     const controller = await json<SessionResponse>(roomResponse);
 
-    const join = async (name: string): Promise<SessionResponse> => {
+    const joinTerminal = async (): Promise<SessionResponse> => {
       const response = await SELF.fetch(`https://example.test/api/rooms/${controller.code}/join`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role: "player", name }),
+        body: JSON.stringify({ role: "terminal" }),
       });
       expect(response.status).toBe(201);
       return json<SessionResponse>(response);
     };
-    const firstPlayer = await join("Lila");
-    const secondPlayer = await join("Noé");
+    const firstTerminal = await joinTerminal();
+    const secondTerminal = await joinTerminal();
 
     const controllerSocket = await openSocket(controller.code, controller.token);
-    const firstSocket = await openSocket(controller.code, firstPlayer.token);
-    const secondSocket = await openSocket(controller.code, secondPlayer.token);
+    const firstSocket = await openSocket(controller.code, firstTerminal.token);
+    const secondSocket = await openSocket(controller.code, secondTerminal.token);
 
     const rejected = await send(firstSocket, { type: "start_game" }, (message) => message.type === "error");
     expect(rejected).toMatchObject({ type: "error", message: "Réservé au contrôleur de jeu." });
 
+    expect((await send(controllerSocket, { type: "add_player", name: "Lila" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 1)).snapshot?.players).toHaveLength(1);
+    expect((await send(controllerSocket, { type: "add_player", name: "Noé" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 2)).snapshot?.players).toHaveLength(2);
     const started = await send(controllerSocket, { type: "start_game" }, (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready");
     expect(started.snapshot?.phase).toBe("awaiting_ready");
     const drawerId = started.snapshot?.turn?.drawerId;
     const turnId = started.snapshot?.turn?.id;
-    const drawerSocket = drawerId === firstPlayer.playerId ? firstSocket : secondSocket;
-    const winnerId = drawerId === firstPlayer.playerId ? secondPlayer.playerId : firstPlayer.playerId;
+    const drawerSocket = firstSocket;
+    const winnerId = started.snapshot?.players.find((player) => player.id !== drawerId)?.id;
     if (!winnerId || !turnId) throw new Error("Tour ou gagnant absent.");
 
-    const restarted = await send(controllerSocket, { type: "cancel_turn", turnId }, (message) => message.type === "snapshot" && message.snapshot?.turn?.id !== turnId);
-    const restartedTurnId = restarted.snapshot?.turn?.id;
-    if (!restartedTurnId) throw new Error("Nouveau tour absent.");
-    const stale = await send(drawerSocket, { type: "ready", turnId }, (message) => message.type === "error");
-    expect(stale).toMatchObject({ type: "error", message: "Cette commande concerne un tour déjà terminé." });
+    const controllerClaim = await send(controllerSocket, { type: "take_drawing_turn", turnId }, (message) => message.type === "error");
+    expect(controllerClaim).toMatchObject({ type: "error", message: "Réservé à un téléphone de dessin." });
 
-    expect((await send(drawerSocket, { type: "ready", turnId: restartedTurnId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "armed")).snapshot?.phase).toBe("armed");
+    expect((await send(drawerSocket, { type: "take_drawing_turn", turnId }, (message) => message.type === "snapshot" && message.snapshot?.canDraw === true)).snapshot?.canDraw).toBe(true);
+    expect((await send(drawerSocket, { type: "ready", turnId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "armed")).snapshot?.phase).toBe("armed");
     const stroke = await send(drawerSocket, {
       type: "stroke",
-      turnId: restartedTurnId,
+      turnId,
       stroke: {
         id: "server-test-stroke",
         tool: "pen",
@@ -119,12 +118,16 @@ describe("Worker et Durable Object de salle", () => {
     }, (message) => message.type === "stroke_delta");
     expect(stroke.type).toBe("stroke_delta");
 
-    const resolved = await send(controllerSocket, { type: "select_winner", turnId: restartedTurnId, playerId: winnerId }, (message) => message.type === "snapshot" && message.snapshot?.turn?.resolutionPending === false);
-    expect(resolved.snapshot?.phase).toBe("revealing");
-    expect(resolved.snapshot?.turn?.resolutionPending).toBe(false);
+    const otherTerminalWinner = await send(secondSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "error");
+    expect(otherTerminalWinner).toMatchObject({ type: "error", message: "Ce téléphone n’est pas le terminal de dessin de ce tour." });
 
-    const duplicate = await send(controllerSocket, { type: "no_winner", turnId: restartedTurnId }, (message) => message.type === "error");
-    expect(duplicate).toMatchObject({ type: "error", message: "Le résultat de ce tour est déjà validé." });
+    const resolved = await send(drawerSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "revealing");
+    expect(resolved.snapshot?.phase).toBe("revealing");
+    expect(resolved.snapshot?.turn?.winnerId).toBe(winnerId);
+    expect(resolved.snapshot?.players.map((player) => player.score)).toEqual([1, 1]);
+
+    const duplicate = await send(drawerSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "error");
+    expect(duplicate).toMatchObject({ type: "error", message: "Le tour n’est plus en cours." });
 
     controllerSocket.close();
     firstSocket.close();

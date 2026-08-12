@@ -2,23 +2,25 @@ import { DurableObject } from "cloudflare:workers";
 import {
   addPlayer,
   appendStroke,
-  cancelTurn,
   configure,
   createRoomState,
-  endGame,
+  expireArmedTurn,
+  expireReadyDrawer,
   expireTurn,
   GameRuleError,
   nextTurn,
+  READY_DURATION_MS,
+  REVEAL_DURATION_MS,
   ready,
   redo,
-  selectNoWinner,
   selectWinner,
   snapshotFor,
   startGame,
+  takeDrawingTurn,
   undo,
   clear,
 } from "../domain/game";
-import type { Player, RoomState, Session } from "../domain/types";
+import type { Role, RoomState, Session } from "../domain/types";
 import { clientCommandSchema, type ClientCommand, type JoinRoomRequest } from "../shared/protocol";
 
 interface SocketAttachment {
@@ -30,10 +32,7 @@ interface CreateRoomInput {
   controllerToken: string;
 }
 
-interface JoinResult {
-  token: string;
-  playerId?: string;
-}
+interface JoinResult { token: string; }
 
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const TICKET_TTL_MS = 60 * 1000;
@@ -90,22 +89,12 @@ export class GameRoom extends DurableObject {
       role: input.role,
       createdAt: now,
     };
-    if (input.role === "player") {
-      const player: Player = {
-        id: randomId(),
-        name: input.name.trim(),
-        score: 0,
-        joinedAt: now,
-      };
-      addPlayer(state, player, now);
-      session.playerId = player.id;
-    }
     state.sessions.push(session);
     state.updatedAt = now;
     this.persist();
     await this.scheduleNextAlarm();
     this.broadcast();
-    return { token, playerId: session.playerId };
+    return { token };
   }
 
   async issueTicket(token: string): Promise<{ ticket: string }> {
@@ -177,13 +166,20 @@ export class GameRoom extends DurableObject {
     const state = this.getState();
     if (!state) return;
     const now = Date.now();
-    if (state.phase === "drawing" && state.current?.deadlineAt && state.current.deadlineAt <= now) {
-      if (expireTurn(state, now)) {
-        this.persist();
-        this.broadcast();
-        await this.scheduleNextAlarm();
-        return;
-      }
+    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now, secureRandom)) {
+      this.persist();
+      this.broadcast();
+      await this.scheduleNextAlarm();
+      return;
+    }
+    const revealedAt = state.phase === "revealing" ? state.current?.revealedAt ?? null : null;
+    const revealDeadline = revealedAt === null ? null : revealedAt + REVEAL_DURATION_MS;
+    if (revealDeadline !== null && revealDeadline <= now) {
+      nextTurn(state, now);
+      this.persist();
+      this.broadcast();
+      await this.scheduleNextAlarm();
+      return;
     }
     if (state.updatedAt + ROOM_TTL_MS <= now) {
       this.ctx.storage.sql.exec("DELETE FROM room_state WHERE id = 1");
@@ -197,7 +193,7 @@ export class GameRoom extends DurableObject {
   private async applyCommand(session: Session, command: ClientCommand): Promise<import("../domain/types").Stroke | null> {
     const state = this.requireState();
     const now = Date.now();
-    if (expireTurn(state, now)) {
+    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now, secureRandom)) {
       this.persist();
       this.broadcast();
       await this.scheduleNextAlarm();
@@ -205,9 +201,9 @@ export class GameRoom extends DurableObject {
     const requireController = (): void => {
       if (session.role !== "controller") throw new GameRuleError("Réservé au contrôleur de jeu.");
     };
-    const requireDrawer = (): string => {
-      if (session.role !== "player" || !session.playerId) throw new GameRuleError("Réservé au dessinateur.");
-      return session.playerId;
+    const requireTerminal = (): string => {
+      if (session.role !== "terminal") throw new GameRuleError("Réservé à un téléphone de dessin.");
+      return session.id;
     };
     const requireCurrentTurn = (turnId: string): void => {
       if (!state.current || state.current.id !== turnId) throw new GameRuleError("Cette commande concerne un tour déjà terminé.");
@@ -220,59 +216,47 @@ export class GameRoom extends DurableObject {
         requireController();
         configure(state, command.settings, now);
         break;
+      case "add_player":
+        requireController();
+        addPlayer(state, { id: randomId(), name: command.name.trim(), score: 0, joinedAt: now }, now);
+        break;
       case "start_game":
         requireController();
         startGame(state, now, secureRandom);
         break;
+      case "take_drawing_turn":
+        requireCurrentTurn(command.turnId);
+        takeDrawingTurn(state, requireTerminal(), now);
+        break;
       case "ready":
         requireCurrentTurn(command.turnId);
-        ready(state, requireDrawer(), now, secureRandom);
+        ready(state, requireTerminal(), now, secureRandom);
         break;
       case "stroke": {
         requireCurrentTurn(command.turnId);
-        const result = appendStroke(state, requireDrawer(), command.stroke, now);
+        const result = appendStroke(state, requireTerminal(), command.stroke, now);
         strokeDelta = result.stroke;
         shouldScheduleAlarm = result.deadlineAt !== null;
         break;
       }
       case "undo":
         requireCurrentTurn(command.turnId);
-        undo(state, requireDrawer(), now);
+        undo(state, requireTerminal(), now);
         shouldScheduleAlarm = false;
         break;
       case "redo":
         requireCurrentTurn(command.turnId);
-        redo(state, requireDrawer(), now);
+        redo(state, requireTerminal(), now);
         shouldScheduleAlarm = false;
         break;
       case "clear":
         requireCurrentTurn(command.turnId);
-        clear(state, requireDrawer(), now);
+        clear(state, requireTerminal(), now);
         shouldScheduleAlarm = false;
         break;
       case "select_winner":
-        requireController();
         requireCurrentTurn(command.turnId);
-        selectWinner(state, command.playerId, now);
-        break;
-      case "no_winner":
-        requireController();
-        requireCurrentTurn(command.turnId);
-        selectNoWinner(state, now, secureRandom);
-        break;
-      case "next_turn":
-        requireController();
-        requireCurrentTurn(command.turnId);
-        nextTurn(state, now);
-        break;
-      case "cancel_turn":
-        requireController();
-        requireCurrentTurn(command.turnId);
-        cancelTurn(state, now);
-        break;
-      case "end_game":
-        requireController();
-        endGame(state, now);
+        selectWinner(state, requireTerminal(), command.playerId, now);
         break;
       default:
         command satisfies never;
@@ -337,12 +321,22 @@ export class GameRoom extends DurableObject {
     if (!row) return null;
     const state = JSON.parse(row.payload) as RoomState;
     state.turnSequence ??= state.current?.round ?? 0;
+    const persistedSessions = state.sessions as Array<Omit<Session, "role"> & { role: Role | "player"; playerId?: string }>;
+    for (const legacySession of persistedSessions) {
+      if (legacySession.role === "player") legacySession.role = "terminal";
+      delete legacySession.playerId;
+    }
     if (state.current) {
       state.current.id ??= `legacy-turn-${state.current.round}`;
       state.current.redoStrokes ??= [];
+      state.current.drawerTerminalSessionId ??= null;
+      state.current.readyDeadlineAt ??= state.updatedAt + READY_DURATION_MS;
+      const current = state.current as typeof state.current & { armedDeadlineAt?: number | null };
+      current.armedDeadlineAt ??= state.phase === "armed" ? state.updatedAt + READY_DURATION_MS : null;
       if (!Number.isInteger(state.current.pointCount) || state.current.pointCount < 0) {
         state.current.pointCount = state.current.strokes.reduce((total, stroke) => total + stroke.points.length, 0);
       }
+      delete (state.current as typeof state.current & { resolutionPending?: boolean }).resolutionPending;
     }
     return state;
   }
@@ -357,7 +351,11 @@ export class GameRoom extends DurableObject {
 
   private async scheduleNextAlarm(): Promise<void> {
     const state = this.requireState();
-    const deadline = state.phase === "drawing" ? state.current?.deadlineAt : null;
+    const readyDeadline = state.phase === "awaiting_ready" ? state.current?.readyDeadlineAt : null;
+    const armedDeadline = state.phase === "armed" ? state.current?.armedDeadlineAt : null;
+    const drawingDeadline = state.phase === "drawing" ? state.current?.deadlineAt : null;
+    const revealedAt = state.phase === "revealing" ? state.current?.revealedAt ?? null : null;
+    const deadline = readyDeadline ?? armedDeadline ?? drawingDeadline ?? (revealedAt === null ? null : revealedAt + REVEAL_DURATION_MS);
     const nextAlarm = deadline ?? state.updatedAt + ROOM_TTL_MS;
     if (await this.ctx.storage.getAlarm() !== nextAlarm) await this.ctx.storage.setAlarm(nextAlarm);
   }
