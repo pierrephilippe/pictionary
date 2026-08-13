@@ -1,0 +1,7 @@
+interface:
+  display_name: "PictioFady Maintainer"
+  short_description: "Contexte compact pour maintenir PictioFady"
+  default_prompt: "Use $pictiofady-maintainer pour modifier PictioFady avec le minimum de contexte et les vérifications adaptées."
+
+policy:
+  allow_implicit_invocation: true
