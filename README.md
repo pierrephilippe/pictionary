@@ -1,8 +1,18 @@
 # PictioFady — Pictionary holographique
 
-PWA multijoueur pour une projection type Pepper’s ghost : le téléphone qui crée la salle devient l’écran du prisme au lancement. Les joueurs sont inscrits sur ce téléphone principal ; les autres téléphones servent uniquement de terminaux de dessin interchangeables.
+PictioFady est une PWA multijoueur conçue pour une projection de type Pepper’s ghost. Le téléphone qui crée la salle inscrit les joueurs puis devient le projecteur au lancement ; les autres téléphones sont des terminaux interchangeables que l’on donne au dessinateur de la manche.
 
-L’application peut être installée depuis le navigateur. Elle conserve son interface hors ligne pour un redémarrage propre, mais une connexion est toujours nécessaire pendant une partie : le dessin, les scores et le mot secret restent autoritaires dans le Durable Object.
+L’interface peut être installée et son enveloppe statique reste disponible hors ligne. Une connexion demeure nécessaire pendant la partie : le Durable Object est l’autorité pour le mot secret, les délais, les scores et le dessin.
+
+## Parcours utilisateur actuel
+
+- Sur mobile, l’accueil occupe deux moitiés superposées de 50 % du viewport : « Créer une partie » et « Rejoindre une partie ». Sur les écrans plus larges, ces deux zones ont la même largeur.
+- La création demande uniquement la difficulté, le nombre de manches et la durée d’une manche. Les thèmes restent internes au catalogue et tous peuvent alimenter le tirage ; il n’existe ni choix de thème ni bouton « Enregistrer ». Le bouton « Lancer avec ces réglages » démarre la partie avec les valeurs affichées.
+- La saisie d’un code utilise six cases, convertit les lettres en majuscules, écarte les caractères ambigus et rejoint automatiquement la salle au sixième caractère.
+- Le lien et le QR code utilisent l’URL directe `/?join=CODE`. L’ouverture de cette URL préremplit le code et tente immédiatement la connexion.
+- L’écran du dessinateur privilégie la zone de dessin. Un menu regroupe le crayon, la gomme, l’épaisseur, annuler, rétablir et l’effacement confirmé ; la sélection du gagnant est présentée séparément.
+- Pendant la phase de dessin, le projecteur masque le mot, le chronomètre, les scores et les indications de manche : seule la toile est rendue. Un toucher peut faire apparaître brièvement les contrôles techniques de projection. Une perte de connexion constitue la seule exception et affiche une reprise explicite plutôt qu’une image figée. Les informations de partie reviennent avant, entre et après les manches.
+- Chaque vue projetée est pré-inversée horizontalement afin que le dessin et le texte retrouvent leur sens normal après la réflexion du plexiglas.
 
 ## Prérequis
 
@@ -16,9 +26,9 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://localhost:8787`. Sur le téléphone de projection, créer une salle, inscrire les joueurs, puis faire rejoindre les téléphones terminaux avec le QR code ou le code court affiché. Au lancement, cet écran passe automatiquement en mode projection.
+Ouvrir ensuite `http://localhost:8787`. Sur le téléphone de projection, créer une salle, inscrire les joueurs, puis faire rejoindre les terminaux avec le QR code, le lien direct ou le code court. Le contrôleur passe automatiquement en mode projection au lancement.
 
-`npm run dev:ui` démarre uniquement Vite : il sert au travail visuel, mais le jeu temps réel nécessite `npm run dev`.
+`npm run dev:ui` démarre uniquement Vite. Cette commande convient au travail visuel, mais le jeu temps réel nécessite `npm run dev` pour disposer du Worker et du Durable Object.
 
 ## Vérifications
 
@@ -28,7 +38,44 @@ npm test
 npm run check
 ```
 
-Le moteur de jeu est isolé dans `src/domain`, le Worker et le Durable Object dans `src/server`, et React dans `src/client`.
+`npm run check` génère les types Wrangler, vérifie TypeScript, construit le bundle Vite puis exécute toute la suite Vitest. Les tests couvrent le moteur de jeu, le Worker/Durable Object, les limites HTTP, le protocole de reprise, le modèle de dessin et la normalisation des codes. Leur nombre évolue avec le produit ; la sortie de Vitest reste la source de vérité plutôt qu’un total figé dans ce document.
+
+## Architecture
+
+- [`src/domain`](src/domain) contient les règles et l’état métier sans dépendance à React.
+- [`src/shared/protocol.ts`](src/shared/protocol.ts) définit avec Zod les commandes client, snapshots et messages serveur stricts.
+- [`src/server/worker.ts`](src/server/worker.ts) porte les routes HTTP, les en-têtes, les limites de corps et les bindings de limitation de débit.
+- [`src/server/room.ts`](src/server/room.ts) porte l’autorité de salle : SQLite, alarmes, autorisations, WebSockets, révisions et diffusion.
+- [`src/client/session.ts`](src/client/session.ts) centralise la session locale, la saisie du code, les appels API et les URL de connexion.
+- [`src/client/useRoomConnection.ts`](src/client/useRoomConnection.ts) gère le ticket, le WebSocket, l’annulation des connexions obsolètes et la reconnexion avec délai exponentiel et gigue.
+- [`src/client/room-state.ts`](src/client/room-state.ts) valide les messages serveur et fusionne les deltas selon leur révision, leur tour, leur époque de canevas et leur offset.
+- [`src/client/drawing`](src/client/drawing) isole le modèle de rendu et le composant canevas réutilisé par le dessinateur et la projection.
+- [`src/client/App.tsx`](src/client/App.tsx) orchestre les écrans et les interactions de jeu.
+
+Le démarrage est une commande atomique `start_game { settings }` : des réglages invalides ne peuvent pas être enregistrés séparément. Chaque état persisté possède une `revision`. Les deltas de trait transportent aussi `turnId`, `canvasRevision` et `offset` ; un fragment ancien, manquant ou reçu après annulation, rétablissement ou effacement provoque une resynchronisation au lieu de corrompre la toile. Une seule connexion WebSocket reste active par session.
+
+## Déroulé et projection
+
+Une salle accepte de 1 à 12 joueurs inscrits et jusqu’à 16 sessions de téléphone terminal. À chaque tour, donnez un terminal au dessinateur désigné : il prend la manche, se déclare prêt, dessine puis choisit le joueur qui a trouvé — ou « Personne n’a trouvé ». Le gagnant et le dessinateur gagnent chacun un point. Une seconde validation du même tour est refusée côté serveur.
+
+Sans validation avant la fin du chronomètre, personne ne marque. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes. Le mot est ensuite révélé pendant cinq secondes avant l’enchaînement automatique.
+
+Le projecteur propose une mire pour pyramide à quatre faces, plexiglas en V à deux faces ou plaque simple. Pour de meilleurs résultats, augmenter la luminosité, activer le plein écran et centrer le support sur la mire. La pyramide privilégie le portrait ; le V et la plaque privilégient le paysage.
+
+## Fiabilité, limites et sécurité
+
+- Les corps JSON HTTP sont limités à 4 KiB et les trames WebSocket textuelles à 24 000 octets. Les trames binaires ou surdimensionnées ferment la connexion avec le code 1009.
+- Les schémas Zod refusent les propriétés inattendues. Les rôles sont contrôlés de nouveau dans le Durable Object ; masquer une action dans React n’est jamais utilisé comme autorisation.
+- Les bindings Cloudflare configurent, par minute et par adresse IP, 5 créations, 40 tentatives de rejoindre et 120 demandes de ticket. Une seconde limite autorise 12 tickets par minute et par session. Chaque session est aussi limitée à 40 trames WebSocket par seconde, y compris les commandes invalides.
+- Les jetons de session sont aléatoires et les tickets WebSocket sont à usage unique, valables 60 secondes. Le mot secret n’est présent que dans le snapshot du terminal dessinateur actif.
+- Un trait réseau contient au plus 96 points ; le moteur borne également chaque trait, le nombre de traits et le total de points d’un tour.
+- Les mutations sont persistées avant diffusion. Une erreur d’envoi ferme seulement le socket concerné et ne bloque pas les autres participants.
+- Une salle expire après deux heures sans activité. L’alarme est toujours planifiée à la première échéance entre la transition de phase et cette expiration. Rejoindre un code inconnu renvoie 404 sans initialiser de table métier.
+- Le service worker ne traite jamais `/api/` et ne met en cache que les navigations et ressources statiques prévues. Les WebSockets et données de jeu ne sont pas mis en cache.
+
+Le jeton de reprise demeure stocké dans `localStorage`. Ce compromis permet la reprise PWA, mais une XSS exécutée sur la même origine pourrait le lire. La CSP restrictive, l’absence de rendu HTML brut et le caractère éphémère des salles réduisent le risque sans le supprimer ; le détail figure dans le rapport de sécurité.
+
+Le code de salle et son QR constituent une invitation au jeu, pas une identité utilisateur. Toute personne qui les possède peut ouvrir un terminal ; ne les diffusez donc qu’aux participants présents. Une approbation individuelle par le contrôleur serait nécessaire pour un usage dans un groupe non fiable.
 
 ## Déploiement
 
@@ -37,38 +84,24 @@ npm run deploy:staging
 npm run deploy:production
 ```
 
-Les environnements staging et production possèdent chacun leur Durable Object SQLite. Les salles, scores et dessins sont temporaires : une salle inactive est supprimée après deux heures.
-
-### Déploiement continu de production
-
-Le workflow GitHub Actions [`.github/workflows/deploy-production.yml`](.github/workflows/deploy-production.yml) se lance à chaque push sur `main`, donc aussi après chaque merge vers cette branche. Il installe les dépendances de façon reproductible, exécute `npm run check`, puis déploie le Worker de production.
+Staging et production possèdent chacun leur Durable Object SQLite. Le workflow GitHub Actions [`.github/workflows/deploy-production.yml`](.github/workflows/deploy-production.yml) se lance sur chaque push vers `main`. Il utilise `npm ci`, audite les dépendances de production au seuil modéré, exécute `npm run check`, puis déploie le Worker de production.
 
 Avant le premier déclenchement, créer dans GitHub (`Settings` → `Secrets and variables` → `Actions`) ces deux *repository secrets* :
 
 - `CLOUDFLARE_API_TOKEN` : un jeton Cloudflare dédié au CI, limité au compte et créé à partir du modèle **Edit Cloudflare Workers** ; ne pas utiliser le jeton de connexion personnel de Wrangler.
-- `CLOUDFLARE_ACCOUNT_ID` : `db89e54a855ccb7a30730e80a971c766`.
+- `CLOUDFLARE_ACCOUNT_ID` : l’identifiant du compte qui héberge le Worker.
 
-La règle de branche GitHub doit exiger une pull request pour `main` si l’on veut que les déploiements proviennent exclusivement de merges, et non de pushes directs.
+Pour n’autoriser que des déploiements issus de merges, la règle de branche de `main` doit exiger une pull request et interdire les pushes directs.
 
-## Déroulé et projection
+## Validations manuelles encore nécessaires
 
-Une partie peut inclure un seul joueur et jusqu’à 16 téléphones terminaux. À chaque tour, donnez n’importe quel téléphone terminal au dessinateur désigné : il démarre son tour, dessine puis sélectionne dans la liste le joueur qui a trouvé — ou « Personne n’a trouvé ». Le gagnant et le dessinateur gagnent chacun un point. Sans validation avant la fin du chronomètre, personne ne marque. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes ; le mot reste révélé cinq secondes, puis le tour suivant commence automatiquement.
+Les comportements dépendant du matériel ou du navigateur ne sont pas prouvés par les tests unitaires :
 
-Le téléphone créateur choisit une mire pour pyramide (4 faces), plexiglas en V (2 faces) ou plaque simple (1 face). Pour de meilleurs résultats, mettre l’écran à luminosité maximale, activer le plein écran et centrer le plexiglas sur la mire. En V ou sur plaque, tournez l’écran en paysage ; en pyramide, le portrait est privilégié.
+- scanner le QR code et confirmer la connexion directe sur iOS et Android ;
+- contrôler la saisie tactile, le clavier mobile et l’affichage 50/50 sur plusieurs hauteurs d’écran ;
+- vérifier le sens réel après réflexion sur les trois supports, en particulier la pyramide ;
+- tester le plein écran, l’orientation et la reprise du Wake Lock après un passage en arrière-plan ;
+- couper puis rétablir le réseau pendant un trait, après un effacement et entre deux manches ;
+- refaire les mesures Lighthouse, Core Web Vitals et tailles de bundle sur le build final.
 
-## Fiabilité et sécurité
-
-- Le Worker applique des en-têtes de sécurité sur l’interface et les API, refuse les corps JSON dépassant 4 KiB et valide strictement chaque commande.
-- Les jetons de session et tickets WebSocket sont opaques, courts et validés côté Durable Object ; le mot n’est inclus que dans le snapshot du terminal dessinateur actif.
-- Les traits sont limités côté protocole et moteur, persistés avant diffusion, puis restaurés au reconnect. Le client espace ses reconnexions et reprend dès le retour du réseau.
-- Le service worker ne met en cache que l’enveloppe statique de l’application. Les routes `/api/` et les WebSockets ne sont jamais mis en cache.
-
-## Compatibilité mobile à valider sur appareils physiques
-
-Le mode projection est conçu pour être fiable sans dépendre d’API optionnelles : il utilise la totalité du viewport visible, puis demande le plein écran, l’orientation et le maintien d’écran actif lorsqu’ils sont disponibles.
-
-- **Safari iOS récent :** l’installation passe par le menu Partager ; le plein écran et le verrouillage d’orientation peuvent être indisponibles. Le mode immersif CSS et l’indication « tournez le téléphone » restent donc la solution de repli.
-- **Chrome Android récent :** vérifier l’entrée/sortie du plein écran après action utilisateur, le verrouillage paysage en V/plaque et la reprise du `Wake Lock` après retour au premier plan.
-- **Dans les deux cas :** vérifier le dessin tactile, le QR/code court, la reconnexion après mode avion, la restauration du dessin et le rendu réel des trois supports à luminosité maximale.
-
-Les résultats synthétiques et le détail des audits sont consignés dans [`docs/quality-audit.md`](docs/quality-audit.md) et [`security_best_practices_report.md`](security_best_practices_report.md).
+Le protocole de validation et les limites des preuves disponibles sont détaillés dans [`docs/quality-audit.md`](docs/quality-audit.md) et [`security_best_practices_report.md`](security_best_practices_report.md).

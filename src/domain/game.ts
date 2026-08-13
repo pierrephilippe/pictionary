@@ -23,14 +23,17 @@ export const READY_DURATION_MS = 30_000;
 
 export interface AppendStrokeResult {
   deadlineAt: number | null;
+  offset: number;
   stroke: Stroke;
 }
 
 export const createRoomState = (code: string, controller: Session, now: number): RoomState => ({
-  version: 1,
+  version: 2,
   code,
   createdAt: now,
   updatedAt: now,
+  lastActivityAt: now,
+  revision: 0,
   phase: "lobby",
   settings: structuredClone(DEFAULT_SETTINGS),
   players: [],
@@ -76,9 +79,9 @@ const chooseRandom = <T>(items: T[], random: () => number): T => {
 
 const chooseWord = (state: RoomState, random: () => number): Word => {
   const matching = CATALOGUE.filter(
-    (word) => state.settings.themes.includes(word.theme) && state.settings.difficulties.includes(word.difficulty),
+    (word) => state.settings.difficulties.includes(word.difficulty),
   );
-  if (matching.length === 0) throw new GameRuleError("Choisissez au moins un thème et une difficulté.");
+  if (matching.length === 0) throw new GameRuleError("Choisissez au moins une difficulté.");
   let candidates = matching.filter((word) => !state.usedWordIds.includes(word.id));
   if (candidates.length === 0) {
     state.usedWordIds = [];
@@ -105,6 +108,7 @@ const newTurn = (round: number, drawerId: string, sequence: number, now: number)
   winnerId: null,
   nextDrawerId: null,
   drawerTerminalSessionId: null,
+  canvasRevision: 0,
 });
 
 const createTurn = (state: RoomState, round: number, drawerId: string, now: number): CurrentTurn => {
@@ -127,15 +131,6 @@ const normaliseStroke = (stroke: Stroke): Stroke => ({
   })),
 });
 
-export function configure(state: RoomState, settings: Settings, now: number): void {
-  if (state.phase !== "lobby") throw new GameRuleError("La partie a déjà commencé.");
-  if (settings.themes.length === 0 || settings.difficulties.length === 0) {
-    throw new GameRuleError("Choisissez au moins un thème et une difficulté.");
-  }
-  state.settings = structuredClone(settings);
-  state.updatedAt = now;
-}
-
 export function addPlayer(state: RoomState, player: Player, now: number): void {
   if (state.phase !== "lobby") throw new GameRuleError("Les inscriptions sont fermées.");
   if (state.players.length >= 12) throw new GameRuleError("La salle est pleine.");
@@ -146,9 +141,19 @@ export function addPlayer(state: RoomState, player: Player, now: number): void {
   state.updatedAt = now;
 }
 
-export function startGame(state: RoomState, now: number, random: () => number): void {
+export function removePlayer(state: RoomState, playerId: string, now: number): void {
+  if (state.phase !== "lobby") throw new GameRuleError("Les inscriptions sont fermées.");
+  const index = state.players.findIndex((player) => player.id === playerId);
+  if (index < 0) throw new GameRuleError("Joueur introuvable.");
+  state.players.splice(index, 1);
+  state.updatedAt = now;
+}
+
+export function startGame(state: RoomState, settings: Settings, now: number, random: () => number): void {
   if (state.phase !== "lobby") throw new GameRuleError("La partie est déjà lancée.");
   if (state.players.length < 1) throw new GameRuleError("Ajoutez au moins un joueur avant de lancer la partie.");
+  if (settings.difficulties.length === 0) throw new GameRuleError("Choisissez au moins une difficulté.");
+  state.settings = structuredClone(settings);
   const drawer = chooseRandom(state.players, random);
   state.current = createTurn(state, 1, drawer.id, now);
   state.phase = "awaiting_ready";
@@ -205,12 +210,16 @@ export function expireArmedTurn(state: RoomState, now: number, random: () => num
 export function appendStroke(
   state: RoomState,
   terminalSessionId: string,
+  canvasRevision: number,
   stroke: Stroke,
   now: number,
 ): AppendStrokeResult {
   const current = state.current;
   if (!current || current.drawerTerminalSessionId !== terminalSessionId || !["armed", "drawing"].includes(state.phase)) {
     throw new GameRuleError("Le dessin n’est pas autorisé.");
+  }
+  if (current.canvasRevision !== canvasRevision) {
+    throw new GameRuleError("Cette commande concerne une ancienne version du dessin.");
   }
   if (current.deadlineAt !== null && now >= current.deadlineAt) {
     expireTurn(state, now);
@@ -228,6 +237,7 @@ export function appendStroke(
 
   const incoming = normaliseStroke(stroke);
   const existing = current.strokes.find((candidate) => candidate.id === incoming.id);
+  const offset = existing?.points.length ?? 0;
   if (current.pointCount + incoming.points.length > MAX_POINTS_PER_TURN) {
     throw new GameRuleError("La limite de points pour ce tour est atteinte.");
   }
@@ -249,7 +259,7 @@ export function appendStroke(
   }
   current.pointCount += incoming.points.length;
   state.updatedAt = now;
-  return { deadlineAt: deadline, stroke: incoming };
+  return { deadlineAt: deadline, offset, stroke: incoming };
 }
 
 function assertActiveTurn(state: RoomState): CurrentTurn {
@@ -272,6 +282,7 @@ export function undo(state: RoomState, terminalSessionId: string, now: number): 
     current.redoStrokes.push(removed);
     current.pointCount -= removed.points.length;
   }
+  current.canvasRevision += 1;
   state.updatedAt = now;
 }
 
@@ -288,6 +299,7 @@ export function redo(state: RoomState, terminalSessionId: string, now: number): 
     current.strokes.push(restored);
     current.pointCount += restored.points.length;
   }
+  current.canvasRevision += 1;
   state.updatedAt = now;
 }
 
@@ -302,6 +314,7 @@ export function clear(state: RoomState, terminalSessionId: string, now: number):
   current.strokes = [];
   current.redoStrokes = [];
   current.pointCount = 0;
+  current.canvasRevision += 1;
   state.updatedAt = now;
 }
 
@@ -368,6 +381,7 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
   const canUseDrawingTerminal = session.role === "terminal" && displayMode === "drawing";
   return {
     code: state.code,
+    revision: state.revision,
     phase: state.phase,
     settings: structuredClone(state.settings),
     players: structuredClone(state.players),
@@ -383,6 +397,7 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
       strokes: structuredClone(current.strokes),
       winnerId: current.winnerId,
       nextDrawerId: current.nextDrawerId,
+      canvasRevision: current.canvasRevision,
     } : null,
     canDraw: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["awaiting_ready", "armed", "drawing"].includes(state.phase),
     canTakeDrawingTurn: canUseDrawingTerminal && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),

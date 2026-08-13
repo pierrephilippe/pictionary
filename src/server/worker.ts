@@ -7,6 +7,7 @@ export { GameRoom } from "./room";
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_JSON_BODY_BYTES = 4_096;
+const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
 class RequestInputError extends Error {}
 
@@ -27,6 +28,27 @@ const json = (value: unknown, init: ResponseInit = {}): Response => {
 };
 
 const errorResponse = (message: string, status = 400): Response => json({ error: message }, { status });
+
+const rateLimitResponse = (): Response => json(
+  { error: "Trop de requêtes. Réessayez dans une minute." },
+  { status: 429, headers: { "retry-after": String(RATE_LIMIT_RETRY_AFTER_SECONDS) } },
+);
+
+const rateLimitActor = (request: Request): string => {
+  const ip = request.headers.get("CF-Connecting-IP")?.trim().toLowerCase();
+  return ip ? `ip:${ip}` : "missing-ip";
+};
+
+const rateLimitKey = (env: Env, scope: string, actor: string): string => `${env.ENVIRONMENT}:${scope}:${actor}`;
+
+const isRateLimitAllowed = async (limiter: RateLimit, key: string): Promise<boolean> => (
+  await limiter.limit({ key })
+).success;
+
+const sha256Hex = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 const newToken = (): string => {
   const bytes = new Uint8Array(32);
@@ -98,6 +120,12 @@ export default {
 
     try {
       if (request.method === "POST" && url.pathname === "/api/rooms") {
+        const actor = rateLimitActor(request);
+        const allowed = await isRateLimitAllowed(
+          env.CREATE_ROOM_RATE_LIMITER,
+          rateLimitKey(env, "create-room", actor),
+        );
+        if (!allowed) return rateLimitResponse();
         const input = createRoomSchema.safeParse(await readJson<unknown>(request));
         if (!input.success) throw new RequestInputError("La requête de création est invalide.");
         for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -119,21 +147,41 @@ export default {
       const stub = asStub(env, code!);
 
       if (request.method === "POST" && action === "join") {
+        const actor = rateLimitActor(request);
+        const allowed = await isRateLimitAllowed(
+          env.JOIN_ROOM_RATE_LIMITER,
+          rateLimitKey(env, "join-room", actor),
+        );
+        if (!allowed) return rateLimitResponse();
         const input = joinRoomSchema.safeParse(await readJson<JoinRoomRequest>(request));
         if (!input.success) throw new RequestInputError("La demande de connexion est invalide.");
         const result = await stub.join(input.data);
-        if ("error" in result) return errorResponse(result.error, 429);
+        if ("error" in result) return errorResponse(result.error, result.status);
         return json({ code, token: result.token, role: input.data.role }, { status: 201 });
       }
 
       if (request.method === "POST" && action === "ticket") {
+        const actor = rateLimitActor(request);
+        const actorAllowed = await isRateLimitAllowed(
+          env.TICKET_IP_RATE_LIMITER,
+          rateLimitKey(env, "ticket-ip", actor),
+        );
+        if (!actorAllowed) return rateLimitResponse();
         const token = bearerToken(request);
         if (!token) return errorResponse("Authentification requise.", 401);
+        const tokenHash = await sha256Hex(token);
+        const sessionAllowed = await isRateLimitAllowed(
+          env.TICKET_SESSION_RATE_LIMITER,
+          rateLimitKey(env, "ticket-session", tokenHash),
+        );
+        if (!sessionAllowed) return rateLimitResponse();
         return json(await stub.issueTicket(token));
       }
 
       if (request.method === "GET" && action === "socket") {
         if (request.headers.get("Upgrade") !== "websocket") return errorResponse("Connexion WebSocket requise.", 426);
+        const origin = request.headers.get("Origin");
+        if (origin && origin !== url.origin) return errorResponse("Origine de connexion refusée.", 403);
         const target = new URL(request.url);
         target.pathname = "/socket";
         return stub.fetch(new Request(target, request));
@@ -141,12 +189,14 @@ export default {
       return errorResponse("Méthode non autorisée.", 405);
     } catch (error) {
       if (error instanceof RequestInputError) return errorResponse(error.message, 400);
+      const message = error instanceof Error ? error.message : String(error);
+      // Durable Object RPC reconstructs thrown errors at the Worker boundary,
+      // so their message is stable but their custom class identity is not.
+      if (message === "Cette salle n’existe plus.") return errorResponse(message, 404);
+      if (message === "Session invalide.") return errorResponse(message, 401);
       if (error instanceof GameRuleError) {
-        if (error.message === "Cette salle n’existe plus.") return errorResponse(error.message, 404);
-        if (error.message === "Session invalide.") return errorResponse(error.message, 401);
         return errorResponse(error.message, 400);
       }
-      const message = error instanceof Error ? error.message : String(error);
       console.error(JSON.stringify({ event: "pictiofady_api_error", path: url.pathname, message }));
       return errorResponse("Une erreur serveur est survenue.", 500);
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Stroke } from "../src/domain/types";
-import { canAppendStrokes, describeStrokes } from "../src/client/App";
+import { canAppendStrokes, describeStrokes } from "../src/client/drawing/model";
 
 const stroke = (id: string, points: number, complete = false): Stroke => ({
   id,

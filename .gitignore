@@ -2,6 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .playwright-cli/
+output/playwright/
 coverage/
 *.cpuprofile
 worker-configuration.d.ts

@@ -12,26 +12,23 @@ import {
   type Tool,
 } from "../domain/types";
 import type { ClientCommand, JoinRoomRequest } from "../shared/protocol";
+import {
+  clearDirectJoinUrl,
+  directJoinCode,
+  loadSession,
+  normaliseRoomCode as normaliseCode,
+  requestJson as request,
+  ROOM_CODE_LENGTH,
+  saveSession,
+  type StoredSession,
+} from "./session";
+import { useRoomConnection } from "./useRoomConnection";
+import { DrawingCanvas } from "./drawing/DrawingCanvas";
 
 const RoomQrCode = lazy(async () => {
   const module = await import("qrcode.react");
   return { default: module.QRCodeSVG };
 });
-
-interface StoredSession {
-  code: string;
-  token: string;
-  role: "controller" | "terminal";
-}
-
-interface ApiError {
-  error?: string;
-}
-
-type ServerMessage =
-  | { type: "snapshot"; snapshot: RoomSnapshot }
-  | { type: "stroke_delta"; round: number; stroke: Stroke }
-  | { type: "error"; message?: string };
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -47,10 +44,9 @@ interface PwaControls {
   applyUpdate: () => void;
 }
 
-const ACTIVE_SESSION_KEY = "pictiofady.active-session";
-const LEGACY_SESSION_KEY = "prisme.active-session";
 const STROKE_CHUNK_SIZE = 96;
 const CLEAR_CONFIRMATION_MS = 4_000;
+type SendCommand = (command: ClientCommand) => boolean;
 
 const haptic = (pattern: number | number[]): void => {
   try {
@@ -58,55 +54,6 @@ const haptic = (pattern: number | number[]): void => {
   } catch {
     // Haptics are an optional enhancement and are unavailable on many browsers.
   }
-};
-
-const request = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
-  const response = await fetch(path, init);
-  const data = await response.json() as T & ApiError;
-  if (!response.ok) throw new Error(data.error ?? "La requête a échoué.");
-  return data;
-};
-
-const saveSession = (session: StoredSession | null): void => {
-  if (!session) {
-    localStorage.removeItem(ACTIVE_SESSION_KEY);
-    localStorage.removeItem(LEGACY_SESSION_KEY);
-    return;
-  }
-  localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
-  localStorage.removeItem(LEGACY_SESSION_KEY);
-};
-
-const loadSession = (): StoredSession | null => {
-  try {
-    const value = localStorage.getItem(ACTIVE_SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
-    const session = value ? JSON.parse(value) as StoredSession : null;
-    const isValidRole = session?.role === "controller" || session?.role === "terminal";
-    const isValidCode = typeof session?.code === "string" && /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/.test(session.code);
-    const isValidToken = typeof session?.token === "string" && /^[A-Za-z0-9_-]{32,64}$/.test(session.token);
-    return isValidRole && isValidCode && isValidToken ? session : null;
-  } catch {
-    return null;
-  }
-};
-
-const ROOM_CODE_LENGTH = 6;
-const normaliseCode = (code: string): string => code.toUpperCase().replace(/[^ABCDEFGHJKLMNPQRSTUVWXYZ23456789]/g, "").slice(0, ROOM_CODE_LENGTH);
-
-const directJoinCode = (): string => normaliseCode(new URLSearchParams(window.location.search).get("join") ?? "");
-
-const clearDirectJoinUrl = (): void => {
-  const url = new URL(window.location.href);
-  if (!url.searchParams.has("join")) return;
-  url.searchParams.delete("join");
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-};
-
-const socketUrl = (code: string, ticket: string): string => {
-  const url = new URL(`/api/rooms/${code}/socket`, window.location.origin);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("ticket", ticket);
-  return url.toString();
 };
 
 function usePwaLifecycle(): PwaControls {
@@ -174,144 +121,6 @@ function usePwaLifecycle(): PwaControls {
   return { canInstall, isInstalled, isAppleMobile, updateAvailable, install, applyUpdate };
 }
 
-function useRoomSocket(session: StoredSession | null) {
-  const socketRef = useRef<WebSocket | null>(null);
-  const reconnectRef = useRef<number | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    setSnapshot(null);
-    setConnectionError(null);
-    setConnected(false);
-    if (!session) return undefined;
-    let disposed = false;
-    let connecting = false;
-    let socket: WebSocket | null = null;
-
-    const stopReconnectTimer = (): void => {
-      if (reconnectRef.current === null) return;
-      window.clearTimeout(reconnectRef.current);
-      reconnectRef.current = null;
-    };
-
-    const scheduleReconnect = (immediately = false): void => {
-      if (disposed || reconnectRef.current !== null) return;
-      if (!navigator.onLine) {
-        setConnectionError("Connexion Internet indisponible. La partie reprendra dès le retour du réseau.");
-        return;
-      }
-      const attempt = reconnectAttemptRef.current;
-      const delay = immediately ? 0 : Math.min(8_000, 500 * 2 ** attempt) + Math.round(Math.random() * 250);
-      reconnectAttemptRef.current = Math.min(attempt + 1, 5);
-      reconnectRef.current = window.setTimeout(() => {
-        reconnectRef.current = null;
-        void connect();
-      }, delay);
-    };
-
-    const connect = async (): Promise<void> => {
-      if (disposed || connecting || socketRef.current?.readyState === WebSocket.OPEN) return;
-      if (!navigator.onLine) {
-        setConnectionError("Connexion Internet indisponible. La partie reprendra dès le retour du réseau.");
-        return;
-      }
-      connecting = true;
-      try {
-        const ticket = await request<{ ticket: string }>(`/api/rooms/${session.code}/ticket`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${session.token}` },
-        });
-        if (disposed) return;
-        socket = new WebSocket(socketUrl(session.code, ticket.ticket));
-        socketRef.current = socket;
-        socket.onopen = () => {
-          if (socketRef.current !== socket) return;
-          reconnectAttemptRef.current = 0;
-          setConnected(true);
-          setConnectionError(null);
-        };
-        socket.onmessage = (event) => {
-          if (socketRef.current !== socket) return;
-          try {
-            const message = JSON.parse(String(event.data)) as ServerMessage;
-            if (message.type === "snapshot") {
-              setSnapshot(message.snapshot);
-              setConnectionError(null);
-            }
-            if (message.type === "stroke_delta") {
-              setSnapshot((previous) => mergeStrokeDelta(previous, message.round, message.stroke));
-            }
-            if (message.type === "error") setConnectionError(message.message ?? "Commande refusée.");
-          } catch {
-            setConnectionError("Réponse serveur illisible.");
-          }
-        };
-        socket.onclose = () => {
-          if (socketRef.current !== socket) return;
-          socketRef.current = null;
-          setConnected(false);
-          if (!disposed) scheduleReconnect();
-        };
-        socket.onerror = () => setConnectionError("La connexion temps réel a rencontré un problème.");
-      } catch (error) {
-        if (!disposed) {
-          setConnected(false);
-          const message = error instanceof Error ? error.message : "Connexion impossible.";
-          setConnectionError(message);
-          if (message === "Cette salle n’existe plus." || message === "Session invalide.") return;
-          scheduleReconnect();
-        }
-      } finally {
-        connecting = false;
-      }
-    };
-    const reconnectNow = (): void => {
-      stopReconnectTimer();
-      void connect();
-    };
-    const recoverWhenVisible = (): void => {
-      if (document.visibilityState === "visible" && socketRef.current?.readyState !== WebSocket.OPEN) reconnectNow();
-    };
-    window.addEventListener("online", reconnectNow);
-    document.addEventListener("visibilitychange", recoverWhenVisible);
-    void connect();
-    return () => {
-      disposed = true;
-      window.removeEventListener("online", reconnectNow);
-      document.removeEventListener("visibilitychange", recoverWhenVisible);
-      stopReconnectTimer();
-      socket?.close();
-      socketRef.current = null;
-    };
-  }, [session?.code, session?.token]);
-
-  const send = useCallback((command: ClientCommand): void => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) {
-      setConnectionError("Connexion en cours de rétablissement.");
-      return;
-    }
-    socketRef.current.send(JSON.stringify(command));
-  }, []);
-
-  return { snapshot, connectionError, connected, send };
-}
-
-const mergeStrokeDelta = (snapshot: RoomSnapshot | null, round: number, stroke: Stroke): RoomSnapshot | null => {
-  if (!snapshot?.turn || snapshot.turn.round !== round) return snapshot;
-  const currentStrokes = snapshot.turn.strokes;
-  const strokeIndex = currentStrokes.findIndex((candidate) => candidate.id === stroke.id);
-  if (strokeIndex >= 0 && currentStrokes[strokeIndex]!.complete) return snapshot;
-  const strokes = strokeIndex >= 0
-    ? currentStrokes.map((candidate, index) => index === strokeIndex
-      ? { ...candidate, points: [...candidate.points, ...stroke.points], complete: candidate.complete || stroke.complete }
-      : candidate)
-    : [...currentStrokes, { ...stroke, points: [...stroke.points] }];
-  return { ...snapshot, turn: { ...snapshot.turn, strokes } };
-};
-
 const formatTime = (milliseconds: number): string => {
   const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -349,12 +158,16 @@ function PhaseCountdown({ deadlineAt, serverNow, label }: { deadlineAt: number; 
 function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
   const sorted = [...snapshot.players].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "fr"));
   return (
-    <ol className={`scoreboard${compact ? " scoreboard--compact" : ""}`}>
-      {sorted.map((player) => (
-        <li key={player.id} className={snapshot.turn?.drawerId === player.id ? "is-drawer" : ""}>
-          <span>{player.name}</span><strong>{player.score}</strong>
-        </li>
-      ))}
+    <ol className={`scoreboard${compact ? " scoreboard--compact" : ""}`} aria-label="Classement">
+      {sorted.map((player) => {
+        const isDrawer = snapshot.phase !== "finished" && snapshot.turn?.drawerId === player.id;
+        return (
+          <li key={player.id} className={isDrawer ? "is-drawer" : ""}>
+            <span>{player.name}{isDrawer ? <small className="scoreboard__role">dessine</small> : null}</span>
+            <strong aria-label={`${player.score} point${player.score > 1 ? "s" : ""}`}>{player.score}<small aria-hidden="true"> pt</small></strong>
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -362,11 +175,11 @@ function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; com
 function RoundProgress({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
   const currentRound = snapshot.turn?.round ?? 0;
   const complete = snapshot.phase === "finished" ? snapshot.settings.rounds : Math.max(0, currentRound - 1);
-  return <ol className={`round-progress${compact ? " round-progress--compact" : ""}`} aria-label={`Progression : tour ${Math.min(currentRound || 1, snapshot.settings.rounds)} sur ${snapshot.settings.rounds}`}>
+  return <ol className={`round-progress${compact ? " round-progress--compact" : ""}`} aria-label={`Progression : manche ${Math.min(currentRound || 1, snapshot.settings.rounds)} sur ${snapshot.settings.rounds}`}>
     {Array.from({ length: snapshot.settings.rounds }, (_, index) => {
       const round = index + 1;
       const state = round <= complete ? "is-complete" : round === currentRound ? "is-current" : "";
-      return <li key={round} className={state}><span className="sr-only">Tour {round}{round <= complete ? " terminé" : round === currentRound ? " en cours" : " à venir"}</span></li>;
+      return <li key={round} className={state}><span className="sr-only">Manche {round}{round <= complete ? " terminée" : round === currentRound ? " en cours" : " à venir"}</span></li>;
     })}
   </ol>;
 }
@@ -378,9 +191,9 @@ function GameStatus({ snapshot }: { snapshot: RoomSnapshot }) {
   const details = (() => {
     switch (snapshot.phase) {
       case "lobby": return { eyebrow: "Salle prête", title: "Ajoutez les joueurs, puis lancez la partie." };
-      case "awaiting_ready": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "C’est votre tour : préparez-vous à dessiner." : turn ? `${turn.drawerName} prend le crayon.` : "Choix du dessinateur…" };
-      case "armed": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: "Le mot est choisi. Le chrono démarre au premier trait." };
-      case "drawing": return { eyebrow: `Tour ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "Dessinez : les autres joueurs devinent." : "À vous de deviner — le dessinateur arbitre." };
+      case "awaiting_ready": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "C’est à vous : préparez-vous à dessiner." : turn ? `${turn.drawerName} prend le crayon.` : "Choix du dessinateur…" };
+      case "armed": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: "Le mot est choisi. Le chrono démarre au premier trait." };
+      case "drawing": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "Dessinez : les autres joueurs devinent." : "À vous de deviner — le dessinateur arbitre." };
       case "revealing": return { eyebrow: "Réponse", title: "Le mot et les points viennent d’être révélés." };
       case "finished": return { eyebrow: "Résultat", title: "La partie est terminée." };
     }
@@ -388,173 +201,23 @@ function GameStatus({ snapshot }: { snapshot: RoomSnapshot }) {
   return <section key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className={`game-status game-status--${snapshot.phase}`} aria-live="polite"><div><p className="eyebrow">{details.eyebrow}</p><strong>{details.title}</strong></div>{countdown ? <PhaseCountdown deadlineAt={countdown} serverNow={snapshot.serverNow} label={countdownLabel} /> : <RoundProgress snapshot={snapshot} compact />}</section>;
 }
 
-function drawStroke(
-  context: CanvasRenderingContext2D,
-  stroke: Stroke,
-  inverse: boolean,
-  width: number,
-  height: number,
-): void {
-  if (stroke.points.length === 0) return;
-  context.save();
-  context.strokeStyle = stroke.tool === "eraser" ? (inverse ? "#000000" : "#ffffff") : (inverse ? "#f8f4ff" : "#11152a");
-  context.fillStyle = context.strokeStyle;
-  context.lineWidth = stroke.width;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  context.beginPath();
-  const first = stroke.points[0]!;
-  if (stroke.points.length === 1) {
-    context.arc(first.x * width, first.y * height, stroke.width / 2, 0, Math.PI * 2);
-    context.fill();
-  } else {
-    context.moveTo(first.x * width, first.y * height);
-    for (let index = 1; index < stroke.points.length; index += 1) {
-      const point = stroke.points[index]!;
-      context.lineTo(point.x * width, point.y * height);
-    }
-    context.stroke();
-  }
-  context.restore();
-}
-
-interface PaintedStroke {
-  id: string;
-  tool: Tool;
-  width: number;
-  pointCount: number;
-  complete: boolean;
-}
-
-export const describeStrokes = (strokes: Stroke[]): PaintedStroke[] => strokes.map((stroke) => ({
-  id: stroke.id,
-  tool: stroke.tool,
-  width: stroke.width,
-  pointCount: stroke.points.length,
-  complete: stroke.complete,
-}));
-
-export const canAppendStrokes = (previous: PaintedStroke[], next: Stroke[]): boolean => previous.length <= next.length && previous.every((stroke, index) => {
-  const candidate = next[index];
-  return candidate?.id === stroke.id
-    && candidate.tool === stroke.tool
-    && candidate.width === stroke.width
-    && candidate.points.length >= stroke.pointCount
-    && (!stroke.complete || candidate.complete);
-});
-
-function DrawingCanvas({
-  strokes,
-  draft,
-  inverse,
-  className,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
-  ariaLabel,
-}: {
-  strokes: Stroke[];
-  draft?: Stroke | null;
-  inverse: boolean;
-  className?: string;
-  onPointerDown?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
-  onPointerMove?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
-  onPointerUp?: (event: React.PointerEvent<HTMLCanvasElement>) => void;
-  ariaLabel?: string;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const paintedRef = useRef<PaintedStroke[]>([]);
-  const dimensionsRef = useRef({ width: 0, height: 0, scale: 0, inverse });
-  const contentsRef = useRef({ strokes, draft, inverse });
-  contentsRef.current = { strokes, draft, inverse };
-  const paint = useCallback((): void => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const bounds = canvas.getBoundingClientRect();
-    const scale = Math.min(window.devicePixelRatio || 1, 2);
-    const pixelWidth = Math.max(1, Math.floor(bounds.width * scale));
-    const pixelHeight = Math.max(1, Math.floor(bounds.height * scale));
-    const contents = contentsRef.current;
-    const dimensions = dimensionsRef.current;
-    const resized = dimensions.width !== pixelWidth || dimensions.height !== pixelHeight || dimensions.scale !== scale;
-    const needsReset = resized || dimensions.inverse !== contents.inverse || !canAppendStrokes(paintedRef.current, contents.strokes);
-    if (resized) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-    }
-    if (!committedCanvasRef.current) committedCanvasRef.current = document.createElement("canvas");
-    const committedCanvas = committedCanvasRef.current;
-    if (resized) {
-      committedCanvas.width = pixelWidth;
-      committedCanvas.height = pixelHeight;
-    }
-    const committedContext = committedCanvas.getContext("2d");
-    const context = canvas.getContext("2d");
-    if (!context || !committedContext) return;
-
-    if (needsReset) {
-      committedContext.setTransform(scale, 0, 0, scale, 0, 0);
-      committedContext.fillStyle = contents.inverse ? "#000000" : "#ffffff";
-      committedContext.fillRect(0, 0, bounds.width, bounds.height);
-      for (const stroke of contents.strokes) drawStroke(committedContext, stroke, contents.inverse, bounds.width, bounds.height);
-    } else {
-      for (let index = 0; index < contents.strokes.length; index += 1) {
-        const stroke = contents.strokes[index]!;
-        const previous = paintedRef.current[index];
-        if (!previous) {
-          drawStroke(committedContext, stroke, contents.inverse, bounds.width, bounds.height);
-          continue;
-        }
-        if (stroke.points.length > previous.pointCount) {
-          const start = Math.max(0, previous.pointCount - 1);
-          drawStroke(committedContext, { ...stroke, points: stroke.points.slice(start) }, contents.inverse, bounds.width, bounds.height);
-        }
-      }
-    }
-
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.drawImage(committedCanvas, 0, 0);
-    context.setTransform(scale, 0, 0, scale, 0, 0);
-    if (contents.draft) drawStroke(context, contents.draft, contents.inverse, bounds.width, bounds.height);
-    paintedRef.current = describeStrokes(contents.strokes);
-    dimensionsRef.current = { width: pixelWidth, height: pixelHeight, scale, inverse: contents.inverse };
-  }, []);
-  useEffect(() => {
-    paint();
-  }, [draft, inverse, paint, strokes]);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-    const observer = new ResizeObserver(paint);
-    observer.observe(canvas);
-    return () => observer.disconnect();
-  }, [paint]);
-  return (
-    <canvas
-      ref={canvasRef}
-      className={className}
-      aria-label={ariaLabel}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
-    />
-  );
-}
-
-function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
   const [tool, setTool] = useState<Tool>("pen");
   const [width, setWidth] = useState(8);
   const [draft, setDraft] = useState<Stroke | null>(null);
   const [clearConfirmation, setClearConfirmation] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [winnerOpen, setWinnerOpen] = useState(false);
   const activeRef = useRef<Stroke | null>(null);
+  const activeCanvasRevisionRef = useRef(0);
   const pendingRef = useRef<Point[]>([]);
   const startedRef = useRef(false);
   const lastFlushRef = useRef(0);
   const draftFrameRef = useRef<number | null>(null);
   const clearTimerRef = useRef<number | null>(null);
+  const winnerTriggerRef = useRef<HTMLButtonElement>(null);
+  const winnerCloseRef = useRef<HTMLButtonElement>(null);
+  const winnerSheetRef = useRef<HTMLDivElement>(null);
   const turn = snapshot.turn;
 
   const cancelClearConfirmation = (): void => {
@@ -572,11 +235,49 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     pendingRef.current = [];
     startedRef.current = false;
     setDraft(null);
+    setMenuOpen(false);
+    setWinnerOpen(false);
     cancelClearConfirmation();
-  }, [turn?.id]);
+  }, [turn?.canvasRevision, turn?.id]);
   useEffect(() => {
-    if (snapshot.phase === "armed") setMenuOpen(true);
-  }, [snapshot.phase, turn?.id]);
+    if (connected) return;
+    activeRef.current = null;
+    pendingRef.current = [];
+    startedRef.current = false;
+    if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
+    draftFrameRef.current = null;
+    setDraft(null);
+    setWinnerOpen(false);
+    cancelClearConfirmation();
+  }, [connected]);
+  useEffect(() => {
+    if (winnerOpen) winnerCloseRef.current?.focus();
+  }, [winnerOpen]);
+
+  const closeWinner = (): void => {
+    setWinnerOpen(false);
+    window.requestAnimationFrame(() => winnerTriggerRef.current?.focus());
+  };
+
+  const keepWinnerFocus = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeWinner();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(winnerSheetRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex='-1'])") ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const queueDraftPaint = (): void => {
     if (draftFrameRef.current !== null) return;
@@ -595,26 +296,31 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     };
   };
 
-  const appendPoint = (active: Stroke, point: Point): void => {
+  const appendPoint = (active: Stroke, point: Point): boolean => {
     const previous = active.points.at(-1)!;
     // Keeping only visually distinct samples reduces message volume on high-Hz
     // touch screens without making fine curves feel polygonal.
-    if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0012) return;
+    if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0012) return false;
     active.points.push(point);
+    return true;
   };
 
-  const flush = (complete: boolean): void => {
+  const flush = (complete: boolean): boolean => {
     const active = activeRef.current;
-    if (!active || !turn || pendingRef.current.length === 0) return;
+    if (!active || !turn || pendingRef.current.length === 0) return false;
     while (pendingRef.current.length > 0) {
-      const points = pendingRef.current.splice(0, STROKE_CHUNK_SIZE);
-      send({ type: "stroke", turnId: turn.id, stroke: { id: active.id, tool: active.tool, width: active.width, points, complete: complete && pendingRef.current.length === 0 } });
+      const points = pendingRef.current.slice(0, STROKE_CHUNK_SIZE);
+      const isLastChunk = points.length === pendingRef.current.length;
+      const sent = send({ type: "stroke", turnId: turn.id, canvasRevision: activeCanvasRevisionRef.current, stroke: { id: active.id, tool: active.tool, width: active.width, points, complete: complete && isLastChunk } });
+      if (!sent) return false;
+      pendingRef.current.splice(0, points.length);
     }
     lastFlushRef.current = performance.now();
+    return true;
   };
 
   const down = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (!snapshot.canDraw || !turn) return;
+    if (!connected || !snapshot.canDraw || !turn) return;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -627,6 +333,7 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
       : width;
     const active: Stroke = { id: crypto.randomUUID(), tool, width: pressureWidth, points: [point], complete: false };
     activeRef.current = active;
+    activeCanvasRevisionRef.current = turn.canvasRevision;
     pendingRef.current = [];
     startedRef.current = false;
     lastFlushRef.current = performance.now();
@@ -638,7 +345,11 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
     if (!active) return;
     const target = event.currentTarget;
     const samples = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
-    for (const sample of samples) appendPoint(active, pointFromCoordinates(target, sample.clientX, sample.clientY));
+    const addedPoints: Point[] = [];
+    for (const sample of samples) {
+      const point = pointFromCoordinates(target, sample.clientX, sample.clientY);
+      if (appendPoint(active, point)) addedPoints.push(point);
+    }
     const point = active.points.at(-1)!;
     if (!startedRef.current) {
       const first = active.points[0]!;
@@ -648,8 +359,8 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
         pendingRef.current = [...active.points];
         haptic(8);
       }
-    } else {
-      pendingRef.current.push(point);
+    } else if (addedPoints.length > 0) {
+      pendingRef.current.push(...addedPoints);
     }
     queueDraftPaint();
     if (startedRef.current && performance.now() - lastFlushRef.current >= 80) flush(false);
@@ -697,46 +408,52 @@ function DrawingBoard({ snapshot, send }: { snapshot: RoomSnapshot; send: (comma
   };
 
   return (
-    <section className="drawing-board drawing-board--terminal">
+    <section className={`drawing-board drawing-board--terminal${connected ? "" : " is-offline"}`}>
       <div className={`drawing-menu${menuOpen ? " is-open" : ""}`}>
-        <button type="button" className="drawing-menu__trigger" aria-expanded={menuOpen} aria-controls="drawing-menu-panel" onClick={() => setMenuOpen((open) => !open)}>
-          <span className="drawing-menu__toggle" aria-hidden="true">☰</span>
-          <span className="drawing-menu__label">Menu</span>
+        <header className="drawing-menu__header">
+          <button type="button" className="drawing-menu__trigger" aria-label={menuOpen ? "Fermer les outils de dessin" : "Ouvrir les outils de dessin"} aria-expanded={menuOpen} aria-controls="drawing-menu-panel" onClick={() => setMenuOpen((open) => !open)}>
+            <span className="drawing-menu__toggle" aria-hidden="true">☰</span>
+          </button>
           <span className="drawing-menu__word"><small>Mot secret</small><strong>{snapshot.secretWord}</strong></span>
           <span className="drawing-menu__timer">{snapshot.phase === "armed" ? "Le chrono démarre au premier trait" : <Timer deadlineAt={turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} />}</span>
-        </button>
+        </header>
         <div id="drawing-menu-panel" className="drawing-menu__panel" hidden={!menuOpen}>
-          <div className="drawing-tools" aria-label="Outils de dessin">
-            <button type="button" className={tool === "pen" ? "selected" : ""} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
-            <button type="button" className={tool === "eraser" ? "selected" : ""} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
+          <div className="drawing-tools" role="group" aria-label="Outils de dessin">
+            <button type="button" className={tool === "pen" ? "selected" : ""} aria-pressed={tool === "pen"} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
+            <button type="button" className={tool === "eraser" ? "selected" : ""} aria-pressed={tool === "eraser"} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
             <label>Épaisseur <input name="stroke-width" aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width}px</output></label>
-            <button type="button" disabled={!turn?.strokes.length} onClick={() => { if (turn) { haptic(6); send({ type: "undo", turnId: turn.id }); } }}>Annuler</button>
-            <button type="button" onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
-            <button type="button" disabled={!turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
+            <button type="button" disabled={!connected || !turn?.strokes.length} onClick={() => { if (turn) { haptic(6); send({ type: "undo", turnId: turn.id }); } }}>Annuler</button>
+            <button type="button" disabled={!connected} onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
+            <button type="button" disabled={!connected || !turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
           </div>
-          <p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p>
-          {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <WinnerSelection snapshot={snapshot} send={send} /> : null}
+          <div className="drawing-menu__footer"><p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p><button type="button" className="drawing-menu__leave" onClick={onLeave}>Quitter la salle</button></div>
         </div>
       </div>
-      <DrawingCanvas
-        strokes={turn?.strokes ?? []}
-        draft={draft}
-        inverse={false}
-        className="drawing-canvas"
-        ariaLabel="Zone de dessin tactile"
-        onPointerDown={down}
-        onPointerMove={move}
-        onPointerUp={up}
-      />
+      <div className="drawing-canvas-shell">
+        <DrawingCanvas
+          strokes={turn?.strokes ?? []}
+          draft={draft}
+          inverse={false}
+          className="drawing-canvas"
+          ariaLabel={connected ? "Zone de dessin tactile" : "Zone de dessin en pause pendant la reconnexion"}
+          ariaDisabled={!connected}
+          onPointerDown={down}
+          onPointerMove={move}
+          onPointerUp={up}
+        />
+        {!connected ? <div className="drawing-offline" role="status"><strong>Dessin en pause</strong><span>{connectionMessage ?? "Reconnexion en cours. Reprenez votre trait quand la connexion revient."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
+      </div>
+      {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>Quelqu’un a trouvé</button></div> : null}
+      {winnerOpen && snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <div className="winner-sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="winner-selection-title" onKeyDown={keepWinnerFocus} onMouseDown={(event) => { if (event.target === event.currentTarget) closeWinner(); }}><div ref={winnerSheetRef} className="winner-sheet"><button ref={winnerCloseRef} type="button" className="winner-sheet__close" aria-label="Fermer la sélection du gagnant" onClick={closeWinner}>×</button><WinnerSelection snapshot={snapshot} connected={connected} send={send} /></div></div> : null}
     </section>
   );
 }
 
-function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+function TerminalScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
   const isDrawer = snapshot.canDraw;
   const turn = snapshot.turn;
   if (isDrawer && ["armed", "drawing"].includes(snapshot.phase)) {
-    return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} send={send} /></main>;
+    return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} connected={connected} connectionMessage={connectionMessage} reconnectLabel={reconnectLabel} onReconnect={onReconnect} send={send} onLeave={onLeave} /></main>;
   }
   return (
     <main className="role-screen player-screen">
@@ -744,22 +461,23 @@ function TerminalScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (com
       <GameStatus snapshot={snapshot} />
       {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
       {snapshot.phase === "awaiting_ready" && !isDrawer && snapshot.canTakeDrawingTurn && turn ? (
-        <section className="status-card"><p className="eyebrow">Tour {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez son tour.</p><button className="button button--primary" onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
+        <section className="status-card"><p className="eyebrow">Manche {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez sa manche.</p><button className="button button--primary" disabled={!connected} onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && !isDrawer && !snapshot.canTakeDrawingTurn ? (
-        <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} prépare son dessin` : "La partie se prépare"}</h1><p>Ce tour utilise déjà un autre téléphone.</p></section>
+        <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} prépare son dessin` : "La partie se prépare"}</h1><p>Cette manche utilise déjà un autre téléphone.</p></section>
       ) : null}
       {snapshot.phase === "awaiting_ready" && isDrawer ? (
-        <section className="status-card"><p className="eyebrow">C’est votre tour</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p><button className="button button--primary" onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
+        <section className="status-card"><p className="eyebrow">C’est à vous</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p><button className="button button--primary" disabled={!connected} onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
       ) : null}
       {snapshot.phase === "revealing" ? <Reveal snapshot={snapshot} /> : null}
-      <section className="terminal-mode-card"><div><strong>Ce terminal peut aussi projeter</strong><p>Activez le fond noir et les traits lumineux pour le plexiglas.</p></div><button disabled={isDrawer} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal du dessinateur reste disponible jusqu’à la fin du tour.</small> : null}</section>
-      <Scoreboard snapshot={snapshot} />
+      <section className="terminal-mode-card"><div><strong>Ce terminal peut aussi projeter</strong><p>Activez le fond noir et les traits lumineux pour le plexiglas.</p></div><button disabled={isDrawer || !connected} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le terminal du dessinateur reste disponible jusqu’à la fin de la manche.</small> : null}</section>
+      {snapshot.phase !== "finished" ? <Scoreboard snapshot={snapshot} /> : null}
+      <button type="button" className="room-leave-button" onClick={onLeave}>Quitter la salle</button>
     </main>
   );
 }
 
-function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+function WinnerSelection({ snapshot, connected, send }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand }) {
   const turn = snapshot.turn;
   const [selectedWinnerId, setSelectedWinnerId] = useState<string | null>(null);
   const candidates = snapshot.players.filter((player) => player.id !== turn?.drawerId);
@@ -767,15 +485,16 @@ function WinnerSelection({ snapshot, send }: { snapshot: RoomSnapshot; send: (co
   if (!turn) return null;
   const selectedWinner = candidates.find((player) => player.id === selectedWinnerId) ?? null;
   const chooseWinner = (): void => {
-    if (!selectedWinner) return;
+    if (!connected || !selectedWinner) return;
     haptic([12, 35, 18]);
     send({ type: "select_winner", turnId: turn.id, playerId: selectedWinner.id });
   };
   const chooseNobody = (): void => {
+    if (!connected) return;
     haptic(10);
     send({ type: "no_winner", turnId: turn.id });
   };
-  return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Validation du dessinateur</p><h2 id="winner-selection-title">Qui a trouvé ?</h2><p>Sélectionnez un joueur, puis validez son point.</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">+1</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : il n’y a pas de joueur à départager.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!selectedWinner} onClick={chooseWinner}>{selectedWinner ? `Valider le point de ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
+  return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Validation du dessinateur</p><h2 id="winner-selection-title">Qui a trouvé ?</h2><p>Sélectionnez un joueur, puis validez son point.</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" disabled={!connected} className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">+1</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : il n’y a pas de joueur à départager.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!connected || !selectedWinner} onClick={chooseWinner}>{selectedWinner ? `Valider le point de ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" disabled={!connected} onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -786,16 +505,19 @@ function ToggleList<T extends string>({
   toggle: (value: T) => void;
   label: (value: T) => string;
 }) {
-  return <div className="toggle-list">{values.map((value) => <button key={value} type="button" className={selected.includes(value) ? "selected" : ""} onClick={() => toggle(value)}>{label(value)}</button>)}</div>;
+  return <div className="toggle-list" role="group" aria-label="Difficultés des mots, plusieurs choix possibles">{values.map((value) => <button key={value} type="button" className={selected.includes(value) ? "selected" : ""} aria-pressed={selected.includes(value)} onClick={() => toggle(value)}>{label(value)}</button>)}</div>;
 }
 
-function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (command: ClientCommand) => void }) {
+function ControllerScreen({ snapshot, connected, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand; onLeave: () => void }) {
   const [settings, setSettings] = useState<Settings>(snapshot.settings);
   const [playerName, setPlayerName] = useState("");
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
-  useEffect(() => {
-    if (snapshot.phase === "lobby") setSettings(snapshot.settings);
-  }, [snapshot.phase, snapshot.settings]);
+  const [launching, setLaunching] = useState(false);
+  const launchPendingRef = useRef(false);
+  const launchTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (launchTimerRef.current !== null) window.clearTimeout(launchTimerRef.current);
+  }, []);
   useEffect(() => {
     if (!copyFeedback) return undefined;
     const timer = window.setTimeout(() => setCopyFeedback(null), 2_500);
@@ -818,31 +540,47 @@ function ControllerScreen({ snapshot, send }: { snapshot: RoomSnapshot; send: (c
       setCopyFeedback("Copie indisponible : scannez le QR code ou saisissez le code.");
     }
   };
+  const launch = (): void => {
+    if (!connected || launchPendingRef.current) return;
+    launchPendingRef.current = true;
+    setLaunching(true);
+    if (!send({ type: "start_game", settings })) {
+      launchPendingRef.current = false;
+      setLaunching(false);
+      return;
+    }
+    launchTimerRef.current = window.setTimeout(() => {
+      launchPendingRef.current = false;
+      launchTimerRef.current = null;
+      setLaunching(false);
+    }, 2_500);
+  };
   return (
     <main className="role-screen controller-screen">
       <RoomHeader snapshot={snapshot} label="Préparation" />
       <GameStatus snapshot={snapshot} />
       <section className="join-card">
         <div><p className="eyebrow">Salle</p><h1>{snapshot.code}</h1><p>Le lien et le QR code ouvrent directement cette salle sur les autres téléphones.</p><button className="link-button" type="button" onClick={() => void copyJoinLink()}>Copier le lien direct</button>{copyFeedback ? <p className="copy-feedback" role="status">{copyFeedback}</p> : null}</div>
-        <Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense>
+        <figure className="join-qr" role="img" aria-label={`QR code pour rejoindre directement la salle ${snapshot.code}`}><Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense><figcaption className="sr-only">Scannez pour rejoindre directement la salle {snapshot.code}.</figcaption></figure>
       </section>
       <section className="settings-card">
         <h2>Joueurs</h2>
-        <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; send({ type: "add_player", name: playerName }); setPlayerName(""); }}><label>Nom du joueur<input name="player-name" value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
-        <Participants snapshot={snapshot} />
+        <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; if (send({ type: "add_player", name: playerName })) setPlayerName(""); }}><label>Nom du joueur<input name="player-name" value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={!connected || playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
+        <Participants snapshot={snapshot} connected={connected} send={send} />
         <h2>Réglages de la partie</h2>
         <label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label>
         <label>Nombre de manches <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} manches</option>)}</select></label>
-        <h3>Difficulté</h3>
+        <h3>Difficultés des mots <small>Plusieurs choix possibles</small></h3>
         <ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={toggleDifficulty} label={(value) => value[0]!.toUpperCase() + value.slice(1)} />
-        <div className="button-row"><button className="button button--primary" disabled={snapshot.players.length < 1 || settings.difficulties.length === 0} onClick={() => { send({ type: "configure", settings }); send({ type: "start_game" }); }}>Lancer avec ces réglages</button></div>
+        <div className="button-row"><button className="button button--primary" disabled={!connected || launching || snapshot.players.length < 1 || settings.difficulties.length === 0} onClick={launch}>{launching ? "Lancement…" : "Lancer avec ces réglages"}</button></div>
       </section>
+      <button type="button" className="room-leave-button" onClick={onLeave}>Quitter la salle</button>
     </main>
   );
 }
 
-function Participants({ snapshot }: { snapshot: RoomSnapshot }) {
-  return <section className="participants"><h2>Joueurs inscrits ({snapshot.players.length}/12)</h2><Scoreboard snapshot={snapshot} /></section>;
+function Participants({ snapshot, connected, send }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand }) {
+  return <section className="participants"><h2>Joueurs inscrits ({snapshot.players.length}/12)</h2>{snapshot.players.length === 0 ? <p className="participants__empty">Ajoutez au moins un joueur pour lancer la partie.</p> : <ul className="participant-list">{snapshot.players.map((player) => <li key={player.id}><span>{player.name}</span><button type="button" disabled={!connected} aria-label={`Retirer ${player.name} de la partie`} onClick={() => send({ type: "remove_player", playerId: player.id })}>Retirer</button></li>)}</ul>}{snapshot.players.length >= 12 ? <p className="participants__full" role="status">La salle est complète.</p> : null}</section>;
 }
 
 function Reveal({ snapshot }: { snapshot: RoomSnapshot }) {
@@ -873,13 +611,24 @@ function ProjectionCue({ snapshot }: { snapshot: RoomSnapshot }) {
   return <div key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className="holo-cue"><strong>{content.title}</strong><span>{content.detail}</span>{content.deadlineAt && content.deadlineLabel ? <PhaseCountdown deadlineAt={content.deadlineAt} serverNow={snapshot.serverNow} label={content.deadlineLabel} /> : null}</div>;
 }
 
-function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSnapshot; onUseDrawingTerminal?: () => void }) {
+function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, onLeave, onUseDrawingTerminal }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; onLeave: () => void; onUseDrawingTerminal?: () => void }) {
   const [layout, setLayout] = useState<ProjectionLayout>("pyramid");
   const [calibration, setCalibration] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [drawingControlsVisible, setDrawingControlsVisible] = useState(false);
   const [immersive, setImmersive] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const presentationMode = immersive || nativeFullscreen;
+  const isDrawing = snapshot.phase === "drawing";
+  const openSettings = useCallback((event: React.MouseEvent<HTMLButtonElement>): void => {
+    settingsTriggerRef.current = event.currentTarget;
+    setSettingsOpen(true);
+  }, []);
+  const closeSettings = useCallback((): void => {
+    setSettingsOpen(false);
+    window.requestAnimationFrame(() => settingsTriggerRef.current?.focus());
+  }, []);
   const preferredOrientation = (nextLayout: ProjectionLayout): "portrait" | "landscape" => nextLayout === "pyramid" ? "portrait" : "landscape";
   const lockOrientation = async (nextLayout: ProjectionLayout): Promise<void> => {
     try {
@@ -895,8 +644,36 @@ function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSn
   };
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
-    if ("wakeLock" in navigator) void (navigator as Navigator & { wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock.request("screen").then((lock) => { wakeLock = lock; }).catch(() => undefined);
-    return () => void wakeLock?.release();
+    let disposed = false;
+    const acquireWakeLock = async (): Promise<void> => {
+      if (disposed || document.visibilityState !== "visible" || !("wakeLock" in navigator)) return;
+      if (wakeLock && !wakeLock.released) return;
+      wakeLock = null;
+      try {
+        const lock = await (navigator as Navigator & { wakeLock: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock.request("screen");
+        if (disposed) {
+          await lock.release();
+          return;
+        }
+        wakeLock = lock;
+        lock.addEventListener("release", () => {
+          if (wakeLock === lock) wakeLock = null;
+        });
+      } catch {
+        // The screen lock is optional and can be denied by the browser or OS.
+      }
+    };
+    const reacquireWhenVisible = (): void => {
+      if (document.visibilityState === "visible") void acquireWakeLock();
+    };
+    document.addEventListener("visibilitychange", reacquireWhenVisible);
+    void acquireWakeLock();
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", reacquireWhenVisible);
+      void wakeLock?.release();
+      wakeLock = null;
+    };
   }, []);
   useEffect(() => {
     const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null };
@@ -916,6 +693,15 @@ function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSn
     document.documentElement.classList.toggle("projection-immersive", presentationMode);
     return () => document.documentElement.classList.remove("projection-immersive");
   }, [presentationMode]);
+  useEffect(() => {
+    if (isDrawing) setSettingsOpen(false);
+    setDrawingControlsVisible(false);
+  }, [isDrawing]);
+  useEffect(() => {
+    if (!isDrawing || !drawingControlsVisible) return undefined;
+    const timer = window.setTimeout(() => setDrawingControlsVisible(false), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [drawingControlsVisible, isDrawing]);
   const enterFullscreen = async (): Promise<void> => {
     // iOS Safari may not expose the Fullscreen API for documents. The CSS mode
     // still removes app chrome and uses the entire visible viewport in that case.
@@ -947,34 +733,58 @@ function ProjectionScreen({ snapshot, onUseDrawingTerminal }: { snapshot: RoomSn
   // In a V support, each half of the display reflects into a lateral face.
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
   const copies = useMemo(() => layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0], [layout]);
-  const isDrawing = snapshot.phase === "drawing";
-  return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}`}>
-    <header className={`projection-header${presentationMode ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={() => setSettingsOpen(true)}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Plein écran</button></div></header>
-    <section className={`projection-stage projection-stage--${layout}`}>
-      {copies.map((rotation, index) => <div key={rotation} className={`projection-copy projection-copy--${rotation}`}>
-        {calibration ? <CalibrationMark number={index + 1} /> : <>{!isDrawing ? <><div className="holo-hud"><span>Tour {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><ProjectionCue snapshot={snapshot} /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></> : null}<DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" ariaLabel="Projection du dessin en cours" /></>}
+  return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}${isDrawing ? " projection-screen--drawing" : ""}`}>
+    <header className={`projection-header${presentationMode || isDrawing ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Projeter en plein écran</button></div></header>
+    <section className={`projection-stage projection-stage--${layout}`} aria-label={isDrawing ? "Projection du dessin. Touchez l’écran pour afficher brièvement les contrôles." : "Zone de projection"} onPointerUp={() => { if (isDrawing) setDrawingControlsVisible(true); }}>
+      {copies.map((rotation, index) => <div key={rotation} className={`projection-copy projection-copy--${rotation}`} aria-hidden={index > 0}>
+        {calibration && !isDrawing ? <CalibrationMark number={index + 1} /> : <>{!isDrawing ? <><div className="holo-hud"><span>Manche {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><ProjectionCue snapshot={snapshot} /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></> : null}<DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" ariaLabel="Projection du dessin en cours" /></>}
       </div>)}
     </section>
-    <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p>
-    {layout === "vee" ? <p className="projection-orientation-notice">Pour le support V, tournez le téléphone à l’horizontale.</p> : null}
-    {presentationMode ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button aria-label="Passer en mode dessin" onClick={onUseDrawingTerminal}>Dessin</button> : null}<button aria-label="Ouvrir les réglages de projection" onClick={() => setSettingsOpen(true)}>Réglages</button><button aria-label="Quitter le plein écran" onClick={() => void exitFullscreen()}>Quitter</button></div> : null}
-    {settingsOpen ? <ProjectionSettings snapshot={snapshot} layout={layout} calibration={calibration} onLayoutChange={changeLayout} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onClose={() => setSettingsOpen(false)} /> : null}
+    {!isDrawing ? <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p> : null}
+    {!isDrawing ? <p className={`projection-orientation-notice projection-orientation-notice--${layout === "pyramid" ? "portrait" : "landscape"}`}>{layout === "pyramid" ? "Pour la pyramide, tournez le téléphone à la verticale." : "Pour ce support, tournez le téléphone à l’horizontale."}</p> : null}
+    {presentationMode && !isDrawing ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button aria-label="Passer en mode dessin" onClick={onUseDrawingTerminal}>Dessin</button> : null}<button aria-label="Ouvrir les réglages de projection" onClick={openSettings}>Réglages</button><button aria-label="Quitter le plein écran" onClick={() => void exitFullscreen()}>Quitter</button></div> : null}
+    {isDrawing && drawingControlsVisible ? <div className="projection-drawing-actions" role="toolbar" aria-label="Contrôles temporaires de projection" onPointerUp={(event) => event.stopPropagation()}>{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button>{presentationMode ? <button onClick={() => void exitFullscreen()}>Quitter le plein écran</button> : null}</div> : null}
+    {isDrawing && !connected ? <div className="projection-interrupted" role="alert"><strong>Projection interrompue</strong><span>{connectionMessage ?? "La connexion à la partie est perdue."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
+    {settingsOpen ? <ProjectionSettings snapshot={snapshot} layout={layout} calibration={calibration} onLayoutChange={changeLayout} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onLeave={onLeave} onClose={closeSettings} /> : null}
   </main>;
 }
 
-function ProjectionSettings({ snapshot, layout, calibration, onLayoutChange, onCalibrationChange, onUseDrawingTerminal, onClose }: { snapshot: RoomSnapshot; layout: ProjectionLayout; calibration: boolean; onLayoutChange: (layout: ProjectionLayout) => void; onCalibrationChange: (value: boolean) => void; onUseDrawingTerminal?: () => void; onClose: () => void }) {
-  return <section className="projection-settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="projection-settings-title">
-    <div className="projection-settings-panel">
-      <div className="projection-settings-heading"><div><p className="eyebrow">Projection</p><h1 id="projection-settings-title">Réglages</h1></div><button className="projection-settings-close" aria-label="Fermer les réglages" onClick={onClose}>×</button></div>
+function ProjectionSettings({ snapshot, layout, calibration, onLayoutChange, onCalibrationChange, onUseDrawingTerminal, onLeave, onClose }: { snapshot: RoomSnapshot; layout: ProjectionLayout; calibration: boolean; onLayoutChange: (layout: ProjectionLayout) => void; onCalibrationChange: (value: boolean) => void; onUseDrawingTerminal?: () => void; onLeave: () => void; onClose: () => void }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => closeRef.current?.focus(), []);
+  const keepFocusInside = (event: React.KeyboardEvent<HTMLElement>): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex='-1'])") ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  return <section className="projection-settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="projection-settings-title" aria-describedby="projection-orientation-help" onKeyDown={keepFocusInside} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div ref={panelRef} className="projection-settings-panel">
+      <div className="projection-settings-heading"><div><p className="eyebrow">Projection</p><h1 id="projection-settings-title">Réglages</h1></div><button ref={closeRef} className="projection-settings-close" aria-label="Fermer les réglages" onClick={onClose}>×</button></div>
       <label>Support <select name="projection-layout" value={layout} onChange={(event) => onLayoutChange(event.target.value as ProjectionLayout)}><option value="pyramid">Pyramide — 4 faces</option><option value="vee">Plexi en V — 2 faces</option><option value="single">Plaque — 1 face</option></select></label>
-      <p className="projection-orientation-help">{layout === "pyramid" ? "La pyramide utilise un carré : le mode portrait est privilégié." : "Ce support utilise le mode paysage afin d’occuper toute la hauteur de l’écran."}</p>
+      <p id="projection-orientation-help" className="projection-orientation-help">{layout === "pyramid" ? "La pyramide utilise un carré : le mode portrait est privilégié." : "Ce support utilise le mode paysage afin d’occuper toute la hauteur de l’écran."}</p>
       <button onClick={() => onCalibrationChange(!calibration)}>{calibration ? "Voir le jeu" : "Afficher la mire"}</button>
       <section className="projection-game-summary" aria-label="Réglages de la partie">
         <h2>Partie en cours</h2>
-        <dl><div><dt>Durée</dt><dd>{snapshot.settings.durationSeconds} secondes</dd></div><div><dt>Tours</dt><dd>{snapshot.settings.rounds}</dd></div><div><dt>Difficulté</dt><dd>{snapshot.settings.difficulties.join(", ")}</dd></div></dl>
-        <p>Les règles sont verrouillées après le lancement afin de préserver le tour en cours.</p>
+        <dl><div><dt>Durée</dt><dd>{snapshot.settings.durationSeconds} secondes</dd></div><div><dt>Manches</dt><dd>{snapshot.settings.rounds}</dd></div><div><dt>Difficulté</dt><dd>{snapshot.settings.difficulties.join(", ")}</dd></div></dl>
+        <p>Les règles sont verrouillées après le lancement afin de préserver la manche en cours.</p>
       </section>
       {onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Revenir au mode dessin</button> : null}
+      <button type="button" className="projection-settings-leave" onClick={onLeave}>Quitter la salle</button>
       <button className="button button--primary" onClick={onClose}>Reprendre la projection</button>
     </div>
   </section>;
@@ -1105,16 +915,21 @@ function Home({ onSession, pwa }: { onSession: (session: StoredSession) => void;
     setError(null);
     setCode(nextCode);
   };
-  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><p>Préparez les joueurs, choisissez la difficulté, le nombre de manches et leur durée.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><span className="brand">PICTIOFADY</span><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} /><p className="subtle">La connexion se lance automatiquement dès que les 6 caractères sont saisis.</p>{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <p className="error-message" role="alert">{error}</p> : null}<PwaInstallCard pwa={pwa} /></section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><p>Préparez les joueurs, choisissez la difficulté, le nombre de manches et leur durée.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><span className="brand">PICTIOFADY</span><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} /><p className="subtle">La connexion se lance automatiquement dès que les 6 caractères sont saisis.</p>{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <div className="join-error"><p className="error-message" role="alert">{error}</p>{code.length === ROOM_CODE_LENGTH ? <button type="button" disabled={busy} onClick={() => { attemptedCodeRef.current = null; void join(code); }}>Réessayer</button> : null}</div> : null}<PwaInstallCard pwa={pwa} /></section></main>;
 }
 
 export function App() {
   const [session, setSession] = useState<StoredSession | null>(() => directJoinCode().length === ROOM_CODE_LENGTH ? null : loadSession());
   const pwa = usePwaLifecycle();
-  const { snapshot, connectionError, connected, send } = useRoomSocket(session);
+  const { snapshot, connectionError, connected, retry, send, sessionUnavailable } = useRoomConnection(session);
   const adoptSession = (next: StoredSession): void => { saveSession(next); setSession(next); };
   const leave = (): void => { saveSession(null); setSession(null); };
   if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} pwa={pwa} /></>;
   if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main></>;
-  return <><PwaUpdateNotice pwa={pwa} /><div className={`connection-banner${connected ? "" : " is-offline"}`} role="status">{connected ? "Synchronisé" : connectionError ?? "Reconnexion…"}</div>{connected && connectionError ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} send={send} /> : <ProjectionScreen snapshot={snapshot} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} onUseDrawingTerminal={() => send({ type: "set_display_mode", displayMode: "drawing" })} /> : <TerminalScreen snapshot={snapshot} send={send} /> : null}<button className="leave-button" onClick={leave}>Quitter la salle</button></>;
+  const reconnectAction = sessionUnavailable ? leave : retry;
+  const reconnectLabel = sessionUnavailable ? "Retour à l’accueil" : "Réessayer";
+  const drawingTerminalActive = session.role === "terminal" && snapshot.displayMode === "drawing" && snapshot.canDraw && ["armed", "drawing"].includes(snapshot.phase);
+  const projectionDrawingActive = snapshot.phase === "drawing" && (session.role === "controller" || snapshot.displayMode === "projection");
+  const hideGlobalConnection = drawingTerminalActive || projectionDrawingActive;
+  return <>{snapshot.phase !== "drawing" ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} onLeave={leave} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
 }

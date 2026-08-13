@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addPlayer,
   appendStroke,
+  clear,
   createRoomState,
   expireArmedTurn,
   expireReadyDrawer,
@@ -10,6 +11,7 @@ import {
   MAX_POINTS_PER_STROKE,
   nextTurn,
   noWinner,
+  removePlayer,
   redo,
   ready,
   selectWinner,
@@ -20,18 +22,19 @@ import {
   undo,
 } from "../src/domain/game";
 import { CATALOGUE, CATALOGUE_SIZE } from "../src/domain/catalogue";
-import type { Player, Session } from "../src/domain/types";
+import { DEFAULT_SETTINGS, type Player, type RoomState, type Session } from "../src/domain/types";
 
 const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0, lastSeenAt: 0 };
 const terminal: Session = { id: "terminal", token: "terminal-token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
 const player = (id: string, name: string): Player => ({ id, name, score: 0, joinedAt: 0 });
 const deterministic = (): number => 0;
+const canvasRevision = (state: RoomState): number => state.current?.canvasRevision ?? 0;
 
 function startedRoom() {
   const state = createRoomState("ABC123", controller, 0);
   addPlayer(state, player("player-1", "Lila"), 1);
   addPlayer(state, player("player-2", "Noé"), 1);
-  startGame(state, 2, deterministic);
+  startGame(state, DEFAULT_SETTINGS, 2, deterministic);
   takeDrawingTurn(state, terminal.id, 2);
   return state;
 }
@@ -47,13 +50,40 @@ describe("moteur de jeu", () => {
     }
   });
 
+  it("applique les réglages avec le démarrage et permet de retirer un joueur seulement au lobby", () => {
+    const state = createRoomState("ATOMIC", controller, 0);
+    addPlayer(state, player("player-1", "Lila"), 1);
+    addPlayer(state, player("player-2", "Noé"), 1);
+    removePlayer(state, "player-2", 2);
+
+    const difficultSettings = { ...DEFAULT_SETTINGS, durationSeconds: 30 as const, rounds: 5 as const, difficulties: ["difficile"] as const };
+    startGame(state, { ...difficultSettings, difficulties: [...difficultSettings.difficulties] }, 3, deterministic);
+
+    expect(state.settings).toEqual(difficultSettings);
+    expect(state.players.map((candidate) => candidate.name)).toEqual(["Lila"]);
+    expect(() => removePlayer(state, "player-1", 4)).toThrow("Les inscriptions sont fermées.");
+    takeDrawingTurn(state, terminal.id, 4);
+    ready(state, terminal.id, 5, deterministic);
+    expect(state.current?.word?.difficulty).toBe("difficile");
+  });
+
+  it("ne modifie pas la partie si les réglages du démarrage sont invalides", () => {
+    const state = createRoomState("INVALID", controller, 0);
+    addPlayer(state, player("player-1", "Lila"), 1);
+
+    expect(() => startGame(state, { ...DEFAULT_SETTINGS, difficulties: [] }, 2, deterministic)).toThrow("Choisissez au moins une difficulté.");
+    expect(state.phase).toBe("lobby");
+    expect(state.current).toBeNull();
+    expect(state.settings).toEqual(DEFAULT_SETTINGS);
+  });
+
   it("autorise une partie à un seul joueur et le même joueur au tour suivant", () => {
     const state = createRoomState("SOLO01", controller, 0);
     addPlayer(state, player("player-1", "Lila"), 1);
-    startGame(state, 2, deterministic);
+    startGame(state, DEFAULT_SETTINGS, 2, deterministic);
     takeDrawingTurn(state, terminal.id, 2);
     ready(state, terminal.id, 3, deterministic);
-    appendStroke(state, terminal.id, {
+    appendStroke(state, terminal.id, canvasRevision(state), {
       id: "solo-stroke", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
 
@@ -99,7 +129,7 @@ describe("moteur de jeu", () => {
     expect(state.phase).toBe("armed");
     expect(state.current?.word).not.toBeNull();
 
-    const appendResult = appendStroke(state, terminal.id, {
+    const appendResult = appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0001",
       tool: "pen",
       width: 8,
@@ -123,7 +153,7 @@ describe("moteur de jeu", () => {
   it("révèle le mot au délai et tire un autre dessinateur sans gagnant", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
-    appendStroke(state, terminal.id, {
+    appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0002", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
     expireTurn(state, 60_005);
@@ -140,7 +170,7 @@ describe("moteur de jeu", () => {
   it("permet au dessinateur de clôturer immédiatement un tour sans gagnant", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
-    appendStroke(state, terminal.id, {
+    appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-no-winner", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
 
@@ -182,7 +212,7 @@ describe("moteur de jeu", () => {
   it("refuse une seconde validation du dessinateur et ne double jamais les points", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
-    appendStroke(state, terminal.id, {
+    appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0003", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
     selectWinner(state, terminal.id, "player-2", 7);
@@ -194,7 +224,7 @@ describe("moteur de jeu", () => {
   it("arrête le dessin à l’échéance et permet de rétablir un trait annulé", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
-    appendStroke(state, terminal.id, {
+    appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0004", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
     undo(state, terminal.id, 6);
@@ -203,10 +233,32 @@ describe("moteur de jeu", () => {
     expect(state.current?.strokes).toHaveLength(1);
 
     expect(expireTurn(state, 60_004)).toBe(false);
-    expect(() => appendStroke(state, terminal.id, {
+    expect(() => appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0005", tool: "pen", width: 8, points: [{ x: 0.2, y: 0.2 }], complete: true,
     }, 60_005)).toThrow("Le temps est écoulé.");
     expect(state.phase).toBe("revealing");
+  });
+
+  it("rejette un fragment retardé après une remise à zéro du canevas", () => {
+    const state = startedRoom();
+    ready(state, terminal.id, 3, deterministic);
+    const initialRevision = canvasRevision(state);
+    const first = appendStroke(state, terminal.id, initialRevision, {
+      id: "stroke-delayed", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: false,
+    }, 5);
+    expect(first.offset).toBe(0);
+
+    const second = appendStroke(state, terminal.id, initialRevision, {
+      id: "stroke-delayed", tool: "pen", width: 8, points: [{ x: 0.2, y: 0.2 }], complete: false,
+    }, 6);
+    expect(second.offset).toBe(1);
+
+    clear(state, terminal.id, 7);
+    expect(canvasRevision(state)).toBe(initialRevision + 1);
+    expect(() => appendStroke(state, terminal.id, initialRevision, {
+      id: "stroke-delayed", tool: "pen", width: 8, points: [{ x: 0.3, y: 0.3 }], complete: true,
+    }, 8)).toThrow("Cette commande concerne une ancienne version du dessin.");
+    expect(state.current?.strokes).toEqual([]);
   });
 
   it("borne le volume du canevas sur un tour", () => {
@@ -214,11 +266,11 @@ describe("moteur de jeu", () => {
     ready(state, terminal.id, 3, deterministic);
     const points = Array.from({ length: MAX_POINTS_PER_STROKE }, (_, index) => ({ x: index / MAX_POINTS_PER_STROKE, y: 0.5 }));
     for (let index = 0; index < 7; index += 1) {
-      appendStroke(state, terminal.id, {
+      appendStroke(state, terminal.id, canvasRevision(state), {
         id: `stroke-limit-${index}`, tool: "pen", width: 8, points, complete: true,
       }, 5 + index);
     }
-    expect(() => appendStroke(state, terminal.id, {
+    expect(() => appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-limit-overflow", tool: "pen", width: 8, points, complete: true,
     }, 20)).toThrow("La limite de points pour ce tour est atteinte.");
   });

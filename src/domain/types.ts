@@ -34,7 +34,6 @@ export interface Player {
 export interface Settings {
   durationSeconds: (typeof DURATIONS)[number];
   rounds: (typeof ROUND_COUNTS)[number];
-  themes: Theme[];
   difficulties: Difficulty[];
 }
 
@@ -61,6 +60,7 @@ export interface CurrentTurn {
   winnerId: string | null;
   nextDrawerId: string | null;
   drawerTerminalSessionId: string | null;
+  canvasRevision: number;
 }
 
 export interface Session {
@@ -81,10 +81,12 @@ export interface ConnectionTicket {
 }
 
 export interface RoomState {
-  version: 1;
+  version: 2;
   code: string;
   createdAt: number;
   updatedAt: number;
+  lastActivityAt: number;
+  revision: number;
   phase: GamePhase;
   settings: Settings;
   players: Player[];
@@ -108,10 +110,12 @@ export interface PublicTurn {
   strokes: Stroke[];
   winnerId: string | null;
   nextDrawerId: string | null;
+  canvasRevision: number;
 }
 
 export interface RoomSnapshot {
   code: string;
+  revision: number;
   phase: GamePhase;
   settings: Settings;
   players: Player[];
@@ -128,6 +132,5 @@ export interface RoomSnapshot {
 export const DEFAULT_SETTINGS: Settings = {
   durationSeconds: 60,
   rounds: 10,
-  themes: [...THEMES],
   difficulties: [...DIFFICULTIES],
 };
