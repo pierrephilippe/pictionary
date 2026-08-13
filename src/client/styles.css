@@ -254,7 +254,15 @@ h2 { font-size: 1.25rem; }
 .projection-interrupted strong { font-size: clamp(1.2rem, 4vw, 2rem); }
 .projection-interrupted span { max-width: 32rem; color: #ddd8e9; font-size: clamp(.8rem, 2vw, 1rem); }
 .projection-interrupted button { margin-top: .35rem; color: #211a35; background: #d7c2ff; }
-.projection-orientation-notice { display: none; }
+.projection-orientation-status { position: fixed; right: max(1rem, env(safe-area-inset-right)); bottom: max(.75rem, env(safe-area-inset-bottom)); left: max(1rem, env(safe-area-inset-left)); z-index: 10; margin: 0; padding: .55rem .8rem; border: 1px solid #7c639e; border-radius: .7rem; color: #f3ebff; background: #171128e8; text-align: center; font-size: .75rem; font-weight: 700; }
+.projection-orientation-guard { position: fixed; inset: 0; z-index: 15; display: grid; align-content: center; justify-items: center; gap: .85rem; padding: max(1.5rem, env(safe-area-inset-top)) max(1.5rem, env(safe-area-inset-right)) max(1.5rem, env(safe-area-inset-bottom)) max(1.5rem, env(safe-area-inset-left)); color: #f7f3ff; background: #050508f7; text-align: center; }
+.projection-orientation-guard > span { font-size: clamp(3rem, 14vw, 6rem); line-height: 1; animation: orientation-nudge 1.8s ease-in-out infinite; }
+.projection-orientation-guard strong { max-width: 32rem; font-size: clamp(1.35rem, 5vw, 2.5rem); }
+.projection-orientation-guard p { max-width: 34rem; margin: 0; color: #c9c3d8; line-height: 1.5; }
+.projection-orientation-guard__actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .6rem; margin-top: .35rem; }
+.projection-orientation-guard button { color: #211a35; background: #d7c2ff; }
+.projection-orientation-guard button + button { color: #eeeafa; background: #202239; }
+@keyframes orientation-nudge { 0%, 100% { transform: rotate(-8deg); } 50% { transform: rotate(8deg); } }
 .projection-settings-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 1rem; background: #05050aec; overscroll-behavior: contain; }
 .projection-settings-panel { display: grid; width: min(100%, 32rem); max-height: min(92dvh, 46rem); gap: 1rem; overflow-y: auto; border: 1px solid #484d78; border-radius: 1.2rem; padding: clamp(1.1rem, 4vw, 1.7rem); color: #eeebfa; background: linear-gradient(145deg, #202440, #111426); box-shadow: 0 1.4rem 4rem #0009; }
 .projection-settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
@@ -272,14 +280,6 @@ h2 { font-size: 1.25rem; }
 .projection-game-summary p { color: #aeadc4; font-size: .78rem; line-height: 1.4; }
 .projection-settings-leave { color: #f0b6c5; background: #3b2230; }
 .projection-settings-leave:hover:not(:disabled) { color: #fff; background: #673044; }
-
-@media (orientation: portrait) {
-  .projection-orientation-notice--landscape { position: fixed; right: 1rem; bottom: 3.6rem; left: 1rem; z-index: 10; display: block; margin: 0; padding: .55rem .8rem; border: 1px solid #7c639e; border-radius: .7rem; color: #f3ebff; background: #171128e8; text-align: center; font-size: .75rem; font-weight: 700; }
-}
-
-@media (orientation: landscape) {
-  .projection-orientation-notice--portrait { position: fixed; right: 1rem; bottom: .75rem; left: 1rem; z-index: 10; display: block; margin: 0; padding: .55rem .8rem; border: 1px solid #7c639e; border-radius: .7rem; color: #f3ebff; background: #171128e8; text-align: center; font-size: .75rem; font-weight: 700; }
-}
 
 @media (orientation: landscape) and (max-height: 500px) {
   .projection-help { display: none; }

@@ -14,7 +14,8 @@ Charge cette référence pour une modification d'écran, de contenu, de dessin, 
 
 - Garder l'écran dominé par la zone de dessin, avec le mot secret complet et un chrono stable.
 - Regrouper crayon, gomme, épaisseur, annuler, rétablir et effacement confirmé dans un menu compact. Indiquer les états sélectionnés visuellement et avec `aria-pressed`.
-- Garder la résolution de manche hors du menu d'outils : action visible « Quelqu'un a trouvé », puis feuille compacte de sélection; ouvrir la résolution au timeout si nécessaire.
+- Garder la résolution de manche hors du menu d'outils : action visible « Quelqu'un a trouvé », puis feuille compacte de sélection. Le dessinateur peut ainsi interrompre la manche; au timeout, figer la toile et ouvrir une résolution obligatoire.
+- Le joueur désigné devient le prochain dessinateur. « Aucun gagnant » ne marque aucun point et déclenche un tirage au sort serveur parmi les autres joueurs.
 - Ne placer aucune action « quitter » au-dessus du canevas. La sortie est secondaire, dans un menu ou en fin de contenu, avec confirmation lorsque le risque le justifie.
 - En reconnexion, empêcher les gestes trompeurs et expliquer si le dessin est conservé, à reprendre ou impossible à envoyer.
 
@@ -25,7 +26,7 @@ Charge cette référence pour une modification d'écran, de contenu, de dessin, 
 - Les contrôles techniques apparaissent brièvement après interaction puis disparaissent. Obtenir un geste utilisateur avant fullscreen si le navigateur l'exige.
 - Afficher informations, scores et consignes avant, entre et après les manches.
 - Pré-inverser chaque face horizontalement pour que la réflexion physique restitue le bon sens; ne pas appliquer un miroir global qui inverse aussi les repères techniques de calibration.
-- Borner pyramide, V et plaque simple par la largeur et la hauteur réellement disponibles. Privilégier portrait pour la pyramide, paysage pour V/plaque et afficher une consigne d'orientation non bloquante.
+- Borner pyramide, V et plaque simple par la largeur et la hauteur réellement disponibles. Imposer portrait pour la pyramide et paysage pour V/plaque; demander plein écran et verrouillage, puis masquer la projection derrière une consigne de rotation tant que l'orientation requise n'est pas respectée.
 
 ## Style et accessibilité
 

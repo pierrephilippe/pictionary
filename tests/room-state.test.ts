@@ -85,6 +85,14 @@ describe("réduction de l’état temps réel", () => {
     expect(parseServerMessage({ ...delta(), stroke: { id: "stroke-0001" } })).toBeNull();
   });
 
+  it("accepte l’état de résolution après le chrono", () => {
+    const resolving = snapshot(12);
+    resolving.phase = "resolving";
+    resolving.canSelectWinner = true;
+    resolving.turn!.deadlineAt = 1_000;
+    expect(parseServerMessage({ type: "snapshot", snapshot: resolving })).not.toBeNull();
+  });
+
   it("accepte dans un snapshot un trait complet plus long qu’un fragment réseau", () => {
     const longStroke = { ...initialStroke, points: Array.from({ length: 1_024 }, (_, index) => ({ x: index / 1_024, y: 0.5 })) };
     const current = snapshot();

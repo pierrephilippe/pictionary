@@ -87,7 +87,9 @@ describe("moteur de jeu", () => {
       id: "solo-stroke", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
 
-    expect(expireTurn(state, 60_005, deterministic)).toBe(true);
+    expect(expireTurn(state, 60_005)).toBe(true);
+    expect(state.phase).toBe("resolving");
+    noWinner(state, terminal.id, 60_006, deterministic);
     expect(state.current?.nextDrawerId).toBe("player-1");
   });
 
@@ -150,21 +152,50 @@ describe("moteur de jeu", () => {
     expect(state.current?.drawerId).toBe("player-2");
   });
 
-  it("révèle le mot au délai et tire un autre dessinateur sans gagnant", () => {
+  it("arrête le dessin au délai et laisse le dessinateur désigner le gagnant suivant", () => {
     const state = startedRoom();
     ready(state, terminal.id, 3, deterministic);
     appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0002", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
     }, 5);
     expireTurn(state, 60_005);
-    expect(state.phase).toBe("revealing");
+    expect(state.phase).toBe("resolving");
     expect(state.current?.winnerId).toBeNull();
-    expect(state.current?.nextDrawerId).toBe("player-2");
+    expect(state.current?.nextDrawerId).toBeNull();
     expect(state.players.map((candidate) => candidate.score)).toEqual([0, 0]);
+    expect(snapshotFor(state, terminal, 60_005).canSelectWinner).toBe(true);
+
+    selectWinner(state, terminal.id, "player-2", 60_006);
+    expect(state.phase).toBe("revealing");
+    expect(state.current?.winnerId).toBe("player-2");
+    expect(state.current?.nextDrawerId).toBe("player-2");
+    expect(state.players.map((candidate) => candidate.score)).toEqual([1, 1]);
 
     nextTurn(state, 60_010);
     expect(state.phase).toBe("awaiting_ready");
     expect(state.current?.drawerId).toBe("player-2");
+  });
+
+  it("tire le prochain dessinateur au sort seulement quand le dessinateur choisit aucun gagnant", () => {
+    const state = createRoomState("RANDOM", controller, 0);
+    addPlayer(state, player("player-1", "Lila"), 1);
+    addPlayer(state, player("player-2", "Noé"), 1);
+    addPlayer(state, player("player-3", "Maya"), 1);
+    startGame(state, DEFAULT_SETTINGS, 2, deterministic);
+    takeDrawingTurn(state, terminal.id, 2);
+    ready(state, terminal.id, 3, deterministic);
+    appendStroke(state, terminal.id, canvasRevision(state), {
+      id: "stroke-timeout-none", tool: "pen", width: 8, points: [{ x: 0.1, y: 0.1 }], complete: true,
+    }, 5);
+
+    expect(expireTurn(state, 60_005)).toBe(true);
+    expect(state.current?.nextDrawerId).toBeNull();
+    noWinner(state, terminal.id, 60_006, () => 0.99);
+
+    expect(state.phase).toBe("revealing");
+    expect(state.current?.winnerId).toBeNull();
+    expect(state.current?.nextDrawerId).toBe("player-3");
+    expect(state.players.map((candidate) => candidate.score)).toEqual([0, 0, 0]);
   });
 
   it("permet au dessinateur de clôturer immédiatement un tour sans gagnant", () => {
@@ -236,7 +267,9 @@ describe("moteur de jeu", () => {
     expect(() => appendStroke(state, terminal.id, canvasRevision(state), {
       id: "stroke-0005", tool: "pen", width: 8, points: [{ x: 0.2, y: 0.2 }], complete: true,
     }, 60_005)).toThrow("Le temps est écoulé.");
-    expect(state.phase).toBe("revealing");
+    expect(state.phase).toBe("resolving");
+    expect(snapshotFor(state, terminal, 60_005).canDraw).toBe(false);
+    expect(() => undo(state, terminal.id, 60_006)).toThrow("Aucun tour en cours.");
   });
 
   it("rejette un fragment retardé après une remise à zéro du canevas", () => {

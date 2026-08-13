@@ -31,11 +31,11 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 
 ## Invariants métier
 
-- Phases : `lobby -> awaiting_ready -> armed -> drawing -> revealing -> finished`; les alarmes font progresser ou expirer la salle côté serveur.
+- Phases : `lobby -> awaiting_ready -> armed -> drawing -> resolving -> revealing -> finished`. `resolving` fige la toile après le chrono et attend une décision explicite du dessinateur; les alarmes font progresser ou expirer la salle côté serveur.
 - Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }`. Les réglages publics ne contiennent que durée, nombre de manches et difficultés.
 - Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, dessine puis résout la manche.
 - Le serveur recalcule toutes les capacités (`canDraw`, `canTakeDrawingTurn`, `canSelectWinner`) et refuse toute commande hors rôle, session, tour ou phase.
-- Une seule validation de gagnant est admise. Les scores et le prochain dessinateur ne sont jamais décidés par le client.
+- Une seule résolution est admise. Le joueur désigné par le dessinateur devient toujours le dessinateur suivant; « Aucun gagnant » choisit aléatoirement un autre joueur. Les scores et le prochain dessinateur sont calculés par le serveur, jamais par le client.
 
 ## Invariants de synchronisation
 

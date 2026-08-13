@@ -1,6 +1,7 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, type RoomSnapshot, type Stroke } from "../src/domain/types";
+import { REVEAL_DURATION_MS } from "../src/domain/game";
+import { DEFAULT_SETTINGS, type RoomSnapshot, type RoomState, type Stroke } from "../src/domain/types";
 
 interface SessionResponse {
   code: string;
@@ -366,11 +367,89 @@ describe("Worker et Durable Object de salle", () => {
     expect(resolved.snapshot?.players.map((player) => player.score)).toEqual([1, 1]);
 
     const duplicate = await send(drawerSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "error");
-    expect(duplicate).toMatchObject({ type: "error", message: "Le tour n’est plus en cours." });
+    expect(duplicate).toMatchObject({ type: "error", message: "La manche ne peut plus être résolue." });
 
     controllerSocket.close();
     firstSocket.close();
     secondSocket.close();
+  });
+
+  it("attend la décision du dessinateur après le chrono puis donne la main au gagnant", async () => {
+    const roomResponse = await workerFetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const terminalResponse = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const terminal = await json<SessionResponse>(terminalResponse);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+    const drawerSocket = await openSocket(controller.code, terminal.token);
+
+    await send(controllerSocket, { type: "add_player", name: "Lila" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 1);
+    await send(controllerSocket, { type: "add_player", name: "Noé" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 2);
+    const started = await send(controllerSocket, { type: "start_game", settings: DEFAULT_SETTINGS }, (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready");
+    const turnId = started.snapshot?.turn?.id;
+    const drawerId = started.snapshot?.turn?.drawerId;
+    const winnerId = started.snapshot?.players.find((player) => player.id !== drawerId)?.id;
+    if (!turnId || !winnerId) throw new Error("Tour ou gagnant absent.");
+
+    await send(drawerSocket, { type: "take_drawing_turn", turnId }, (message) => message.type === "snapshot" && message.snapshot?.canDraw === true);
+    await send(drawerSocket, { type: "ready", turnId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "armed");
+    await send(drawerSocket, {
+      type: "stroke",
+      turnId,
+      canvasRevision: 0,
+      stroke: { id: "timeout-stroke", tool: "pen", width: 8, points: [{ x: 0.2, y: 0.2 }], complete: true },
+    }, (message) => message.type === "snapshot" && message.snapshot?.phase === "drawing");
+    controllerSocket.close();
+    drawerSocket.close();
+
+    const stub = env.GAME_ROOM.getByName(`room:${controller.code}`);
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one();
+      const persisted = JSON.parse(row.payload) as RoomState;
+      if (!persisted.current) throw new Error("Tour persistant absent.");
+      persisted.current.deadlineAt = Date.now() - 1;
+      state.storage.sql.exec("UPDATE room_state SET payload = ? WHERE id = 1", JSON.stringify(persisted));
+      return state.storage.setAlarm(Date.now());
+    });
+    await evictDurableObject(stub);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one();
+      const persisted = JSON.parse(row.payload) as RoomState;
+      expect(persisted.phase).toBe("resolving");
+      expect(persisted.current?.winnerId).toBeNull();
+      expect(persisted.current?.nextDrawerId).toBeNull();
+    });
+
+    const resolvingDrawerSocket = await openSocket(controller.code, terminal.token);
+    const resolved = await send(resolvingDrawerSocket, { type: "select_winner", turnId, playerId: winnerId }, (message) => message.type === "snapshot" && message.snapshot?.phase === "revealing");
+    expect(resolved.snapshot?.turn?.winnerId).toBe(winnerId);
+    expect(resolved.snapshot?.turn?.nextDrawerId).toBe(winnerId);
+    resolvingDrawerSocket.close();
+
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one();
+      const persisted = JSON.parse(row.payload) as RoomState;
+      if (!persisted.current) throw new Error("Tour persistant absent.");
+      persisted.current.revealedAt = Date.now() - REVEAL_DURATION_MS;
+      state.storage.sql.exec("UPDATE room_state SET payload = ? WHERE id = 1", JSON.stringify(persisted));
+    });
+    await evictDurableObject(stub);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one();
+      const persisted = JSON.parse(row.payload) as RoomState;
+      expect(persisted.phase).toBe("awaiting_ready");
+      expect(persisted.current?.round).toBe(2);
+      expect(persisted.current?.drawerId).toBe(winnerId);
+    });
   });
 
   it("borne le nombre de terminaux persistés dans une salle", async () => {

@@ -40,7 +40,7 @@ case "$scope" in
   client)
     prepare_types
     npx tsc --noEmit
-    npx vitest run tests/session.test.ts tests/room-state.test.ts tests/drawing.test.ts
+    npx vitest run tests/session.test.ts tests/room-state.test.ts tests/drawing.test.ts tests/projection.test.ts
     ;;
   domain)
     npx vitest run tests/game.test.ts

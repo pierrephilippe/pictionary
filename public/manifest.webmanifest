@@ -3,6 +3,7 @@
   "short_name": "PictioFady",
   "start_url": "/",
   "display": "standalone",
+  "orientation": "any",
   "background_color": "#0a0c18",
   "theme_color": "#0a0c18",
   "lang": "fr",

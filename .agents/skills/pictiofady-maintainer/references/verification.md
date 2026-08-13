@@ -30,6 +30,7 @@ Le script du skill sélectionne un sous-ensemble sans mémoriser les longues com
 | Code de salle, session locale, URL directe | `tests/session.test.ts` |
 | Fusion snapshot/delta, reprises, offsets | `tests/room-state.test.ts` |
 | Modèle de rendu du dessin | `tests/drawing.test.ts` |
+| Support de projection, orientation et persistance du choix | `tests/projection.test.ts` |
 | Phases, scores, autorisations métier | `tests/game.test.ts` |
 | Durable Object, tickets, WebSockets, alarmes, migrations | `tests/room.test.ts` |
 | Limites HTTP par IP/session | `tests/rate-limit.test.ts` |

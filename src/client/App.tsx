@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   DIFFICULTIES,
   DURATIONS,
@@ -24,6 +24,16 @@ import {
 } from "./session";
 import { useRoomConnection } from "./useRoomConnection";
 import { DrawingCanvas } from "./drawing/DrawingCanvas";
+import {
+  loadProjectionLayout,
+  lockProjectionOrientation,
+  PROJECTION_LAYOUTS,
+  projectionOrientationMatches,
+  requiredProjectionOrientation,
+  saveProjectionLayout,
+  unlockProjectionOrientation,
+  type OrientationLockState,
+} from "./projection";
 
 const RoomQrCode = lazy(async () => {
   const module = await import("qrcode.react");
@@ -194,6 +204,7 @@ function GameStatus({ snapshot }: { snapshot: RoomSnapshot }) {
       case "awaiting_ready": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "C’est à vous : préparez-vous à dessiner." : turn ? `${turn.drawerName} prend le crayon.` : "Choix du dessinateur…" };
       case "armed": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: "Le mot est choisi. Le chrono démarre au premier trait." };
       case "drawing": return { eyebrow: `Manche ${turn?.round ?? 0}/${snapshot.settings.rounds}`, title: snapshot.canDraw ? "Dessinez : les autres joueurs devinent." : "À vous de deviner — le dessinateur arbitre." };
+      case "resolving": return { eyebrow: "Temps écoulé", title: snapshot.canSelectWinner ? "Désignez le gagnant de la manche." : "Le dessinateur désigne le gagnant." };
       case "revealing": return { eyebrow: "Réponse", title: "Le mot et les points viennent d’être révélés." };
       case "finished": return { eyebrow: "Résultat", title: "La partie est terminée." };
     }
@@ -251,8 +262,31 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     cancelClearConfirmation();
   }, [connected]);
   useEffect(() => {
-    if (winnerOpen) winnerCloseRef.current?.focus();
-  }, [winnerOpen]);
+    if (snapshot.phase !== "resolving") return;
+    // The authoritative timer has stopped the manche. Drop any local gesture
+    // still held by the pointer so it cannot remain painted over the frozen
+    // canvas while the drawer chooses the winner.
+    activeRef.current = null;
+    pendingRef.current = [];
+    startedRef.current = false;
+    if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
+    draftFrameRef.current = null;
+    setDraft(null);
+    setMenuOpen(false);
+    cancelClearConfirmation();
+  }, [snapshot.phase]);
+  useEffect(() => {
+    if (!winnerOpen) return;
+    window.requestAnimationFrame(() => {
+      const target = snapshot.phase === "resolving"
+        ? winnerSheetRef.current?.querySelector<HTMLElement>("button:not(:disabled)") ?? winnerSheetRef.current
+        : winnerCloseRef.current;
+      target?.focus();
+    });
+  }, [snapshot.phase, winnerOpen]);
+  useEffect(() => {
+    if (connected && snapshot.phase === "resolving" && snapshot.canSelectWinner) setWinnerOpen(true);
+  }, [connected, snapshot.canSelectWinner, snapshot.phase, turn?.id]);
 
   const closeWinner = (): void => {
     setWinnerOpen(false);
@@ -262,7 +296,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
   const keepWinnerFocus = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     if (event.key === "Escape") {
       event.preventDefault();
-      closeWinner();
+      if (snapshot.phase !== "resolving") closeWinner();
       return;
     }
     if (event.key !== "Tab") return;
@@ -411,7 +445,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     <section className={`drawing-board drawing-board--terminal${connected ? "" : " is-offline"}`}>
       <div className={`drawing-menu${menuOpen ? " is-open" : ""}`}>
         <header className="drawing-menu__header">
-          <button type="button" className="drawing-menu__trigger" aria-label={menuOpen ? "Fermer les outils de dessin" : "Ouvrir les outils de dessin"} aria-expanded={menuOpen} aria-controls="drawing-menu-panel" onClick={() => setMenuOpen((open) => !open)}>
+          <button type="button" className="drawing-menu__trigger" disabled={!snapshot.canDraw} aria-label={menuOpen ? "Fermer les outils de dessin" : "Ouvrir les outils de dessin"} aria-expanded={menuOpen} aria-controls="drawing-menu-panel" onClick={() => setMenuOpen((open) => !open)}>
             <span className="drawing-menu__toggle" aria-hidden="true">☰</span>
           </button>
           <span className="drawing-menu__word"><small>Mot secret</small><strong>{snapshot.secretWord}</strong></span>
@@ -419,12 +453,12 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
         </header>
         <div id="drawing-menu-panel" className="drawing-menu__panel" hidden={!menuOpen}>
           <div className="drawing-tools" role="group" aria-label="Outils de dessin">
-            <button type="button" className={tool === "pen" ? "selected" : ""} aria-pressed={tool === "pen"} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
-            <button type="button" className={tool === "eraser" ? "selected" : ""} aria-pressed={tool === "eraser"} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
-            <label>Épaisseur <input name="stroke-width" aria-label="Épaisseur du trait" type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width}px</output></label>
-            <button type="button" disabled={!connected || !turn?.strokes.length} onClick={() => { if (turn) { haptic(6); send({ type: "undo", turnId: turn.id }); } }}>Annuler</button>
-            <button type="button" disabled={!connected} onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
-            <button type="button" disabled={!connected || !turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
+            <button type="button" disabled={!snapshot.canDraw} className={tool === "pen" ? "selected" : ""} aria-pressed={tool === "pen"} onClick={() => { setTool("pen"); haptic(6); }}>Crayon</button>
+            <button type="button" disabled={!snapshot.canDraw} className={tool === "eraser" ? "selected" : ""} aria-pressed={tool === "eraser"} onClick={() => { setTool("eraser"); haptic(6); }}>Gomme</button>
+            <label>Épaisseur <input name="stroke-width" aria-label="Épaisseur du trait" disabled={!snapshot.canDraw} type="range" min="2" max="28" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><output>{width}px</output></label>
+            <button type="button" disabled={!connected || !snapshot.canDraw || !turn?.strokes.length} onClick={() => { if (turn) { haptic(6); send({ type: "undo", turnId: turn.id }); } }}>Annuler</button>
+            <button type="button" disabled={!connected || !snapshot.canDraw} onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
+            <button type="button" disabled={!connected || !snapshot.canDraw || !turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
           </div>
           <div className="drawing-menu__footer"><p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p><button type="button" className="drawing-menu__leave" onClick={onLeave}>Quitter la salle</button></div>
         </div>
@@ -435,24 +469,24 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
           draft={draft}
           inverse={false}
           className="drawing-canvas"
-          ariaLabel={connected ? "Zone de dessin tactile" : "Zone de dessin en pause pendant la reconnexion"}
-          ariaDisabled={!connected}
+          ariaLabel={!connected ? "Zone de dessin en pause pendant la reconnexion" : snapshot.canDraw ? "Zone de dessin tactile" : "Dessin figé en attente de la décision du dessinateur"}
+          ariaDisabled={!connected || !snapshot.canDraw}
           onPointerDown={down}
           onPointerMove={move}
           onPointerUp={up}
         />
         {!connected ? <div className="drawing-offline" role="status"><strong>Dessin en pause</strong><span>{connectionMessage ?? "Reconnexion en cours. Reprenez votre trait quand la connexion revient."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
       </div>
-      {snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>Quelqu’un a trouvé</button></div> : null}
-      {winnerOpen && snapshot.phase === "drawing" && snapshot.canSelectWinner && turn ? <div className="winner-sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="winner-selection-title" onKeyDown={keepWinnerFocus} onMouseDown={(event) => { if (event.target === event.currentTarget) closeWinner(); }}><div ref={winnerSheetRef} className="winner-sheet"><button ref={winnerCloseRef} type="button" className="winner-sheet__close" aria-label="Fermer la sélection du gagnant" onClick={closeWinner}>×</button><WinnerSelection snapshot={snapshot} connected={connected} send={send} /></div></div> : null}
+      {["drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>{snapshot.phase === "resolving" ? "Désigner le gagnant" : "Quelqu’un a trouvé"}</button></div> : null}
+      {winnerOpen && ["drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="winner-sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="winner-selection-title" onKeyDown={keepWinnerFocus} onMouseDown={(event) => { if (snapshot.phase === "drawing" && event.target === event.currentTarget) closeWinner(); }}><div ref={winnerSheetRef} className="winner-sheet" tabIndex={-1}>{snapshot.phase === "drawing" ? <button ref={winnerCloseRef} type="button" className="winner-sheet__close" aria-label="Fermer la sélection du gagnant" onClick={closeWinner}>×</button> : null}<WinnerSelection snapshot={snapshot} connected={connected} send={send} /></div></div> : null}
     </section>
   );
 }
 
 function TerminalScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
-  const isDrawer = snapshot.canDraw;
+  const isDrawer = snapshot.canDraw || snapshot.canSelectWinner;
   const turn = snapshot.turn;
-  if (isDrawer && ["armed", "drawing"].includes(snapshot.phase)) {
+  if (isDrawer && ["armed", "drawing", "resolving"].includes(snapshot.phase)) {
     return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} connected={connected} connectionMessage={connectionMessage} reconnectLabel={reconnectLabel} onReconnect={onReconnect} send={send} onLeave={onLeave} /></main>;
   }
   return (
@@ -494,7 +528,7 @@ function WinnerSelection({ snapshot, connected, send }: { snapshot: RoomSnapshot
     haptic(10);
     send({ type: "no_winner", turnId: turn.id });
   };
-  return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Validation du dessinateur</p><h2 id="winner-selection-title">Qui a trouvé ?</h2><p>Sélectionnez un joueur, puis validez son point.</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" disabled={!connected} className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">+1</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : il n’y a pas de joueur à départager.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!connected || !selectedWinner} onClick={chooseWinner}>{selectedWinner ? `Valider le point de ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" disabled={!connected} onClick={chooseNobody}>Personne n’a trouvé</button></div></section>;
+  return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Décision du dessinateur</p><h2 id="winner-selection-title">Qui a gagné la manche ?</h2><p>{snapshot.phase === "resolving" ? "Le temps est écoulé. Désignez le gagnant pour continuer." : "Le gagnant devient le prochain dessinateur."}</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" disabled={!connected} className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">Prochain dessinateur</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : choisissez « Aucun gagnant » pour continuer.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!connected || !selectedWinner} onClick={chooseWinner}>{selectedWinner ? `Choisir ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" disabled={!connected} onClick={chooseNobody}>Aucun gagnant — tirage au sort</button></div></section>;
 }
 
 function ToggleList<T extends string>({
@@ -585,7 +619,7 @@ function Participants({ snapshot, connected, send }: { snapshot: RoomSnapshot; c
 
 function Reveal({ snapshot }: { snapshot: RoomSnapshot }) {
   const winner = snapshot.players.find((player) => player.id === snapshot.turn?.winnerId);
-  return <section className={`reveal-card${winner ? " reveal-card--success" : ""}`} aria-live="assertive"><Celebration /><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? <><strong>Bravo {winner.name} !</strong> +1 point pour lui et pour le dessinateur.</> : "Personne n’a trouvé : le prochain dessinateur a été tiré au sort."}</p></section>;
+  return <section className={`reveal-card${winner ? " reveal-card--success" : ""}`} aria-live="assertive"><Celebration /><p className="eyebrow">La réponse était</p><h1>{snapshot.turn?.revealedWord}</h1><p>{winner ? <><strong>Bravo {winner.name} !</strong> Il devient le prochain dessinateur. +1 point pour lui et pour le dessinateur.</> : "Aucun gagnant : le prochain dessinateur a été tiré au sort."}</p></section>;
 }
 
 function Finished({ snapshot }: { snapshot: RoomSnapshot }) {
@@ -603,6 +637,7 @@ function ProjectionCue({ snapshot }: { snapshot: RoomSnapshot }) {
     if (snapshot.phase === "lobby") return { title: "Salle en préparation", detail: "Ajoutez les joueurs pour commencer." };
     if (snapshot.phase === "awaiting_ready") return { title: "À vos crayons", detail: turn ? `${turn.drawerName} prend le relais.` : "Choix du dessinateur…", deadlineAt: turn?.readyDeadlineAt ?? null, deadlineLabel: "Relève" };
     if (snapshot.phase === "armed") return { title: "Le mot est choisi", detail: "Le chronomètre commence au premier trait.", deadlineAt: turn?.armedDeadlineAt ?? null, deadlineLabel: "Commencez" };
+    if (snapshot.phase === "resolving") return { title: "Temps écoulé", detail: "Le dessinateur désigne le gagnant." };
     if (snapshot.phase === "revealing") return { title: "La réponse était", detail: turn?.revealedWord ?? "" };
     if (snapshot.phase === "finished") return { title: "Partie terminée", detail: "Score final affiché." };
     return null;
@@ -612,13 +647,22 @@ function ProjectionCue({ snapshot }: { snapshot: RoomSnapshot }) {
 }
 
 function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, onLeave, onUseDrawingTerminal }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; onLeave: () => void; onUseDrawingTerminal?: () => void }) {
-  const [layout, setLayout] = useState<ProjectionLayout>("pyramid");
+  const [layout, setLayout] = useState<ProjectionLayout>(() => {
+    try {
+      return loadProjectionLayout(window.localStorage);
+    } catch {
+      return "pyramid";
+    }
+  });
   const [calibration, setCalibration] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [drawingControlsVisible, setDrawingControlsVisible] = useState(false);
   const [immersive, setImmersive] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [orientationLockState, setOrientationLockState] = useState<OrientationLockState>("idle");
+  const [orientationMatches, setOrientationMatches] = useState(() => projectionOrientationMatches(layout, window.innerWidth, window.innerHeight));
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const ownsFullscreenRef = useRef(false);
   const presentationMode = immersive || nativeFullscreen;
   const isDrawing = snapshot.phase === "drawing";
   const openSettings = useCallback((event: React.MouseEvent<HTMLButtonElement>): void => {
@@ -629,17 +673,25 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     setSettingsOpen(false);
     window.requestAnimationFrame(() => settingsTriggerRef.current?.focus());
   }, []);
-  const preferredOrientation = (nextLayout: ProjectionLayout): "portrait" | "landscape" => nextLayout === "pyramid" ? "portrait" : "landscape";
-  const lockOrientation = async (nextLayout: ProjectionLayout): Promise<void> => {
-    try {
-      const orientation = screen.orientation as ScreenOrientation & { lock?: (orientation: string) => Promise<void> };
-      await orientation.lock?.(preferredOrientation(nextLayout));
-    } catch {
-      // iOS Safari and some browsers do not permit programmatic orientation locks.
-    }
-  };
+  const orientationController = (): (ScreenOrientation & { lock?: (orientation: "portrait" | "landscape") => Promise<void> }) | undefined =>
+    screen.orientation as ScreenOrientation & { lock?: (orientation: "portrait" | "landscape") => Promise<void> };
+  const releaseOrientation = useCallback((): void => {
+    unlockProjectionOrientation(orientationController());
+    setOrientationLockState("idle");
+  }, []);
+  const lockOrientation = useCallback(async (nextLayout: ProjectionLayout): Promise<void> => {
+    const state = await lockProjectionOrientation(nextLayout, orientationController());
+    setOrientationLockState(state);
+  }, []);
   const changeLayout = (nextLayout: ProjectionLayout): void => {
     setLayout(nextLayout);
+    try {
+      saveProjectionLayout(window.localStorage, nextLayout);
+    } catch {
+      // The in-memory selection remains valid when storage is unavailable.
+    }
+    setOrientationMatches(projectionOrientationMatches(nextLayout, window.innerWidth, window.innerHeight));
+    setOrientationLockState("idle");
     if (presentationMode) void lockOrientation(nextLayout);
   };
   useEffect(() => {
@@ -680,15 +732,40 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     const syncFullscreen = (): void => {
       const active = Boolean(document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement);
       setNativeFullscreen(active);
-      if (!active) setImmersive(false);
+      if (!active) {
+        ownsFullscreenRef.current = false;
+        setImmersive(false);
+        releaseOrientation();
+      } else {
+        void lockOrientation(layout);
+      }
     };
     document.addEventListener("fullscreenchange", syncFullscreen);
     document.addEventListener("webkitfullscreenchange", syncFullscreen);
+    syncFullscreen();
     return () => {
       document.removeEventListener("fullscreenchange", syncFullscreen);
       document.removeEventListener("webkitfullscreenchange", syncFullscreen);
     };
-  }, []);
+  }, [layout, lockOrientation, releaseOrientation]);
+  useEffect(() => {
+    const updateOrientation = (): void => {
+      setOrientationMatches(projectionOrientationMatches(layout, window.innerWidth, window.innerHeight));
+    };
+    const relockWhenVisible = (): void => {
+      updateOrientation();
+      if (document.visibilityState === "visible" && presentationMode) void lockOrientation(layout);
+    };
+    updateOrientation();
+    window.addEventListener("resize", updateOrientation);
+    screen.orientation?.addEventListener?.("change", updateOrientation);
+    document.addEventListener("visibilitychange", relockWhenVisible);
+    return () => {
+      window.removeEventListener("resize", updateOrientation);
+      screen.orientation?.removeEventListener?.("change", updateOrientation);
+      document.removeEventListener("visibilitychange", relockWhenVisible);
+    };
+  }, [layout, lockOrientation, presentationMode]);
   useEffect(() => {
     document.documentElement.classList.toggle("projection-immersive", presentationMode);
     return () => document.documentElement.classList.remove("projection-immersive");
@@ -710,6 +787,7 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     const requestFullscreen = fullscreenElement.requestFullscreen?.bind(fullscreenElement) ?? fullscreenElement.webkitRequestFullscreen?.bind(fullscreenElement);
     try {
       await requestFullscreen?.();
+      ownsFullscreenRef.current = Boolean(document.fullscreenElement ?? (document as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement);
     } catch {
       // Keep the CSS presentation fallback active.
     }
@@ -717,6 +795,7 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
   };
   const exitFullscreen = async (): Promise<void> => {
     setImmersive(false);
+    releaseOrientation();
     const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> };
     const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
     try {
@@ -724,24 +803,33 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     } catch {
       // The fallback only changes local presentation styles.
     }
-    try {
-      screen.orientation?.unlock?.();
-    } catch {
-      // Orientation locks are optional and may not be exposed by the browser.
-    }
+    ownsFullscreenRef.current = false;
   };
+  useEffect(() => () => {
+    unlockProjectionOrientation(orientationController());
+    if (!ownsFullscreenRef.current) return;
+    const fullscreenDocument = document as Document & { webkitExitFullscreen?: () => Promise<void> };
+    const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
+    try {
+      void exit?.();
+    } catch {
+      // The document may already be leaving fullscreen during unmount.
+    }
+  }, []);
   // In a V support, each half of the display reflects into a lateral face.
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
-  const copies = useMemo(() => layout === "pyramid" ? [0, 90, 180, 270] : layout === "vee" ? [90, 270] : [0], [layout]);
+  const copies = PROJECTION_LAYOUTS[layout].copies;
+  const requiredOrientation = requiredProjectionOrientation(layout);
   return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}${isDrawing ? " projection-screen--drawing" : ""}`}>
-    <header className={`projection-header${presentationMode || isDrawing ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Projeter en plein écran</button></div></header>
-    <section className={`projection-stage projection-stage--${layout}`} aria-label={isDrawing ? "Projection du dessin. Touchez l’écran pour afficher brièvement les contrôles." : "Zone de projection"} onPointerUp={() => { if (isDrawing) setDrawingControlsVisible(true); }}>
+    <header className={`projection-header${presentationMode || isDrawing ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Activer et verrouiller la projection</button></div></header>
+    <section className={`projection-stage projection-stage--${layout}`} aria-label={isDrawing ? "Projection du dessin. Touchez l’écran pour afficher brièvement les contrôles." : "Zone de projection"} aria-hidden={!orientationMatches} onPointerUp={() => { if (isDrawing) setDrawingControlsVisible(true); }}>
       {copies.map((rotation, index) => <div key={rotation} className={`projection-copy projection-copy--${rotation}`} aria-hidden={index > 0}>
         {calibration && !isDrawing ? <CalibrationMark number={index + 1} /> : <>{!isDrawing ? <><div className="holo-hud"><span>Manche {snapshot.turn?.round ?? 0}/{snapshot.settings.rounds}</span><Timer deadlineAt={snapshot.turn?.deadlineAt ?? null} serverNow={snapshot.serverNow} /><span>{snapshot.turn?.revealedWord ?? ""}</span></div><ProjectionCue snapshot={snapshot} /><div className="holo-scores"><Scoreboard snapshot={snapshot} compact /></div></> : null}<DrawingCanvas strokes={snapshot.turn?.strokes ?? []} inverse className="hologram-canvas" ariaLabel="Projection du dessin en cours" /></>}
       </div>)}
     </section>
     {!isDrawing ? <p className="projection-help">Placez le plexiglas au centre de la mire. Le fond noir et les traits lumineux sont optimisés pour la réflexion.</p> : null}
-    {!isDrawing ? <p className={`projection-orientation-notice projection-orientation-notice--${layout === "pyramid" ? "portrait" : "landscape"}`}>{layout === "pyramid" ? "Pour la pyramide, tournez le téléphone à la verticale." : "Pour ce support, tournez le téléphone à l’horizontale."}</p> : null}
+    {!isDrawing && orientationMatches && orientationLockState === "manual" ? <p className="projection-orientation-status" role="status">Orientation correcte. Le verrouillage automatique est indisponible sur ce navigateur.</p> : null}
+    {!orientationMatches ? <section className="projection-orientation-guard" role="alert" aria-live="assertive"><span aria-hidden="true">↻</span><strong>{requiredOrientation === "portrait" ? "Tournez le téléphone à la verticale" : "Tournez le téléphone à l’horizontale"}</strong><p>{orientationLockState === "manual" ? "Le navigateur ne peut pas tourner l’écran automatiquement. La projection reprendra dans la bonne orientation." : "Cette orientation est requise pour ce support et sera verrouillée lorsque le navigateur l’autorise."}</p><div className="projection-orientation-guard__actions"><button type="button" onClick={() => void enterFullscreen()}>{orientationLockState === "manual" ? "Réessayer le verrouillage" : "Activer et verrouiller"}</button><button type="button" onClick={openSettings}>Changer de support</button></div></section> : null}
     {presentationMode && !isDrawing ? <div className="projection-presentation-actions">{onUseDrawingTerminal ? <button aria-label="Passer en mode dessin" onClick={onUseDrawingTerminal}>Dessin</button> : null}<button aria-label="Ouvrir les réglages de projection" onClick={openSettings}>Réglages</button><button aria-label="Quitter le plein écran" onClick={() => void exitFullscreen()}>Quitter</button></div> : null}
     {isDrawing && drawingControlsVisible ? <div className="projection-drawing-actions" role="toolbar" aria-label="Contrôles temporaires de projection" onPointerUp={(event) => event.stopPropagation()}>{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button>{presentationMode ? <button onClick={() => void exitFullscreen()}>Quitter le plein écran</button> : null}</div> : null}
     {isDrawing && !connected ? <div className="projection-interrupted" role="alert"><strong>Projection interrompue</strong><span>{connectionMessage ?? "La connexion à la partie est perdue."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
@@ -928,8 +1016,11 @@ export function App() {
   if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></main></>;
   const reconnectAction = sessionUnavailable ? leave : retry;
   const reconnectLabel = sessionUnavailable ? "Retour à l’accueil" : "Réessayer";
-  const drawingTerminalActive = session.role === "terminal" && snapshot.displayMode === "drawing" && snapshot.canDraw && ["armed", "drawing"].includes(snapshot.phase);
+  const drawingTerminalActive = session.role === "terminal" && snapshot.displayMode === "drawing" && (
+    (snapshot.canDraw && ["armed", "drawing"].includes(snapshot.phase))
+    || (snapshot.canSelectWinner && snapshot.phase === "resolving")
+  );
   const projectionDrawingActive = snapshot.phase === "drawing" && (session.role === "controller" || snapshot.displayMode === "projection");
   const hideGlobalConnection = drawingTerminalActive || projectionDrawingActive;
-  return <>{snapshot.phase !== "drawing" ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} onLeave={leave} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
+  return <>{!["drawing", "resolving"].includes(snapshot.phase) ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} onLeave={leave} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
 }

@@ -8,7 +8,7 @@ export type Difficulty = (typeof DIFFICULTIES)[number];
 export type Role = "controller" | "terminal";
 export type TerminalDisplayMode = "drawing" | "projection";
 export type ProjectionLayout = "pyramid" | "vee" | "single";
-export type GamePhase = "lobby" | "awaiting_ready" | "armed" | "drawing" | "revealing" | "finished";
+export type GamePhase = "lobby" | "awaiting_ready" | "armed" | "drawing" | "resolving" | "revealing" | "finished";
 export type Tool = "pen" | "eraser";
 
 export interface Point {

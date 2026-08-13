@@ -80,7 +80,7 @@ const publicTurnSchema = z.object({
 export const roomSnapshotSchema = z.object({
   code: z.string().regex(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/),
   revision: z.number().int().nonnegative(),
-  phase: z.enum(["lobby", "awaiting_ready", "armed", "drawing", "revealing", "finished"]),
+  phase: z.enum(["lobby", "awaiting_ready", "armed", "drawing", "resolving", "revealing", "finished"]),
   settings: settingsSchema,
   players: z.array(playerSchema).max(12),
   turn: publicTurnSchema.nullable(),

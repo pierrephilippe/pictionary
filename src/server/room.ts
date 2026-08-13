@@ -238,7 +238,7 @@ export class GameRoom extends DurableObject<Env> {
       for (const ws of this.ctx.getWebSockets()) this.safeClose(ws, 1001, "Room expired");
       return;
     }
-    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now, secureRandom)) {
+    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now)) {
       this.persist();
       this.broadcast();
       await this.scheduleNextAlarm();
@@ -259,7 +259,7 @@ export class GameRoom extends DurableObject<Env> {
   private async applyCommand(session: Session, command: ClientCommand): Promise<StrokeDeltaMessage | null> {
     const state = this.requireState();
     const now = Date.now();
-    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now, secureRandom)) {
+    if (expireReadyDrawer(state, now, secureRandom) || expireArmedTurn(state, now, secureRandom) || expireTurn(state, now)) {
       this.persist();
       this.broadcast();
       await this.scheduleNextAlarm();

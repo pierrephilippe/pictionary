@@ -56,11 +56,11 @@ Le démarrage est une commande atomique `start_game { settings }` : des réglage
 
 ## Déroulé et projection
 
-Une salle accepte de 1 à 12 joueurs inscrits et jusqu’à 16 sessions de téléphone terminal. À chaque tour, donnez un terminal au dessinateur désigné : il prend la manche, se déclare prêt, dessine puis choisit le joueur qui a trouvé — ou « Personne n’a trouvé ». Le gagnant et le dessinateur gagnent chacun un point. Une seconde validation du même tour est refusée côté serveur.
+Une salle accepte de 1 à 12 joueurs inscrits et jusqu’à 16 sessions de téléphone terminal. À chaque manche, donnez un terminal au dessinateur désigné : il prend la manche, se déclare prêt, dessine puis choisit le joueur qui a trouvé — ou « Aucun gagnant ». Le joueur désigné et le dessinateur gagnent chacun un point, et le joueur désigné devient le dessinateur de la manche suivante. Une seconde validation de la même manche est refusée côté serveur.
 
-Sans validation avant la fin du chronomètre, personne ne marque. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes. Le mot est ensuite révélé pendant cinq secondes avant l’enchaînement automatique.
+Le dessinateur peut interrompre la manche dès qu’un joueur trouve. À la fin du chronomètre, le dessin se fige et la partie attend sa décision : s’il choisit « Aucun gagnant », personne ne marque et le prochain dessinateur est tiré au sort parmi les autres joueurs. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes. Le mot est ensuite révélé pendant cinq secondes avant l’enchaînement automatique.
 
-Le projecteur propose une mire pour pyramide à quatre faces, plexiglas en V à deux faces ou plaque simple. Pour de meilleurs résultats, augmenter la luminosité, activer le plein écran et centrer le support sur la mire. La pyramide privilégie le portrait ; le V et la plaque privilégient le paysage.
+Le projecteur propose une mire pour pyramide à quatre faces, plexiglas en V à deux faces ou plaque simple. Pour de meilleurs résultats, augmenter la luminosité, activer le mode projection et centrer le support sur la mire. La pyramide impose le portrait ; le V et la plaque imposent le paysage. L’application demande le plein écran et le verrouillage correspondant, puis bloque le rendu avec une consigne de rotation si le navigateur refuse ou si l’appareil est mal orienté.
 
 ## Fiabilité, limites et sécurité
 

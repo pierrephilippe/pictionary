@@ -56,7 +56,7 @@ export const displayModeFor = (session: Session): TerminalDisplayMode => session
 export function setTerminalDisplayMode(state: RoomState, session: Session, displayMode: TerminalDisplayMode, now: number): void {
   if (session.role !== "terminal") throw new GameRuleError("Réservé à un téléphone de dessin.");
   const isActiveDrawer = state.current?.drawerTerminalSessionId === session.id
-    && ["awaiting_ready", "armed", "drawing"].includes(state.phase);
+    && ["awaiting_ready", "armed", "drawing", "resolving"].includes(state.phase);
   if (displayMode === "projection" && isActiveDrawer) {
     throw new GameRuleError("Le terminal de dessin actif ne peut pas passer en mode projecteur.");
   }
@@ -319,7 +319,10 @@ export function clear(state: RoomState, terminalSessionId: string, now: number):
 }
 
 function reveal(state: RoomState, now: number): void {
-  const current = assertActiveTurn(state);
+  const current = state.current;
+  if (!current || !["armed", "drawing", "resolving", "revealing"].includes(state.phase)) {
+    throw new GameRuleError("Aucun tour en cours.");
+  }
   current.revealedAt = now;
   state.phase = "revealing";
   state.updatedAt = now;
@@ -327,7 +330,7 @@ function reveal(state: RoomState, now: number): void {
 
 export function selectWinner(state: RoomState, terminalSessionId: string, winnerId: string, now: number): void {
   const current = state.current;
-  if (state.phase !== "drawing" || !current) throw new GameRuleError("Le tour n’est plus en cours.");
+  if (!["drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
   assertDrawerTerminal(state, terminalSessionId);
   if (current.drawerId === winnerId) throw new GameRuleError("Le dessinateur ne peut pas valider son propre point.");
   const winner = getPlayer(state, winnerId);
@@ -341,18 +344,19 @@ export function selectWinner(state: RoomState, terminalSessionId: string, winner
 
 export function noWinner(state: RoomState, terminalSessionId: string, now: number, random: () => number): void {
   const current = state.current;
-  if (state.phase !== "drawing" || !current) throw new GameRuleError("Le tour n’est plus en cours.");
+  if (!["drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
   assertDrawerTerminal(state, terminalSessionId);
   current.winnerId = null;
   current.nextDrawerId = chooseNextDrawer(state, current.drawerId, random).id;
   reveal(state, now);
 }
 
-export function expireTurn(state: RoomState, now: number, random: () => number = () => 0): boolean {
+export function expireTurn(state: RoomState, now: number): boolean {
   if (state.phase !== "drawing" || !state.current?.deadlineAt || state.current.deadlineAt > now) return false;
   state.current.winnerId = null;
-  state.current.nextDrawerId = chooseNextDrawer(state, state.current.drawerId, random).id;
-  reveal(state, now);
+  state.current.nextDrawerId = null;
+  state.phase = "resolving";
+  state.updatedAt = now;
   return true;
 }
 
@@ -401,9 +405,9 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
     } : null,
     canDraw: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["awaiting_ready", "armed", "drawing"].includes(state.phase),
     canTakeDrawingTurn: canUseDrawingTerminal && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),
-    canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && state.phase === "drawing",
+    canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["drawing", "resolving"].includes(state.phase),
     displayMode,
-    secretWord: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing"].includes(state.phase)
+    secretWord: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing", "resolving"].includes(state.phase)
       ? current?.word?.label ?? null
       : null,
     finishedWinnerIds: structuredClone(state.finishedWinnerIds),
