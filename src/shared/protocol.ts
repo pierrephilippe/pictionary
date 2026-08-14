@@ -38,6 +38,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("remove_player"), playerId: z.string().min(8).max(80) }).strict(),
   z.object({ type: z.literal("start_game"), settings: settingsSchema }).strict(),
   z.object({ type: z.literal("return_to_lobby") }).strict(),
+  z.object({ type: z.literal("delete_room") }).strict(),
   z.object({ type: z.literal("set_display_mode"), displayMode: z.enum(["drawing", "projection"]) }).strict(),
   z.object({ type: z.literal("take_drawing_turn"), ...turnCommand }).strict(),
   z.object({ type: z.literal("ready"), ...turnCommand }).strict(),

@@ -192,6 +192,9 @@ export class GameRoom extends DurableObject<Env> {
         this.safeClose(ws, 1008, "Session missing");
         return;
       }
+      // A deletion can close several sockets while already queued frames are
+      // still delivered. They no longer belong to a room and must be ignored.
+      if (!this.getState()) return;
       const session = this.getSession(attachment.sessionId);
       try {
         // Count every accepted socket frame, including malformed and refused
@@ -299,6 +302,10 @@ export class GameRoom extends DurableObject<Env> {
         requireController();
         returnToLobby(state, now);
         break;
+      case "delete_room":
+        requireController();
+        await this.deleteRoom();
+        return null;
       case "set_display_mode":
         setTerminalDisplayMode(state, session, command.displayMode, now);
         break;
@@ -368,6 +375,15 @@ export class GameRoom extends DurableObject<Env> {
       const session = state.sessions.find((candidate) => candidate.id === attachment.sessionId);
       if (session) this.sendSnapshot(ws, session);
     }
+  }
+
+  private async deleteRoom(): Promise<void> {
+    // Remove the durable source of truth before closing sockets: close events
+    // and any already queued frames then cannot revive or persist the room.
+    this.ctx.storage.sql.exec("DELETE FROM room_state WHERE id = 1");
+    this.state = null;
+    await this.ctx.storage.deleteAlarm();
+    for (const ws of this.ctx.getWebSockets()) this.safeClose(ws, 4004, "Room deleted");
   }
 
   private sendSnapshot(ws: WebSocket, session: Session): void {

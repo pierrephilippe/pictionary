@@ -124,6 +124,12 @@ export function useRoomConnection(session: StoredSession | null) {
             setConnectionError("Cette salle a expiré.");
             return;
           }
+          if (event.code === 4004 && event.reason === "Room deleted") {
+            fatal = true;
+            setSessionUnavailable(true);
+            setConnectionError("Cette partie a été supprimée par son organisateur.");
+            return;
+          }
           scheduleReconnect();
         };
         candidate.onerror = () => {

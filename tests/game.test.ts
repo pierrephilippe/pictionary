@@ -123,6 +123,19 @@ describe("moteur de jeu", () => {
     expect(state.current?.nextDrawerId).toBe("player-2");
   });
 
+  it("laisse le dessinateur interrompre la manche dès que le mot est prêt", () => {
+    const state = startedRoom();
+    ready(state, terminal.id, 3, deterministic);
+
+    expect(state.phase).toBe("armed");
+    expect(snapshotFor(state, terminal, 3).canSelectWinner).toBe(true);
+    selectWinner(state, terminal.id, "player-2", 4);
+
+    expect(state.phase).toBe("revealing");
+    expect(state.current?.strokes).toHaveLength(0);
+    expect(state.current?.nextDrawerId).toBe("player-2");
+  });
+
   it("démarre le chrono au premier trait, puis attribue les points au premier joueur qui valide", () => {
     const state = startedRoom();
     expect(state.phase).toBe("awaiting_ready");

@@ -652,6 +652,57 @@ describe("Worker et Durable Object de salle", () => {
     await expect(json<{ error: string }>(rejected)).resolves.toEqual({ error: "La limite de téléphones terminaux est atteinte." });
   });
 
+  it("permet au contrôleur de supprimer définitivement la salle et ferme chaque téléphone", async () => {
+    const roomResponse = await workerFetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const firstJoined = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const secondJoined = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const firstTerminal = await json<SessionResponse>(firstJoined);
+    const secondTerminal = await json<SessionResponse>(secondJoined);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+    const firstTerminalSocket = await openSocket(controller.code, firstTerminal.token);
+    const secondTerminalSocket = await openSocket(controller.code, secondTerminal.token);
+
+    const terminalRejected = await send(
+      firstTerminalSocket,
+      { type: "delete_room" },
+      (message) => message.type === "error",
+    );
+    expect(terminalRejected).toMatchObject({ type: "error", message: "Réservé au contrôleur de jeu." });
+
+    const closed = [controllerSocket, firstTerminalSocket, secondTerminalSocket].map(waitForClose);
+    controllerSocket.send(JSON.stringify({ type: "delete_room" }));
+
+    await expect(Promise.all(closed)).resolves.toEqual([
+      expect.objectContaining({ code: 4004, reason: "Room deleted" }),
+      expect.objectContaining({ code: 4004, reason: "Room deleted" }),
+      expect.objectContaining({ code: 4004, reason: "Room deleted" }),
+    ]);
+
+    const stub = env.GAME_ROOM.getByName(`room:${controller.code}`);
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count).toBe(0);
+    });
+    const rejoin = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    expect(rejoin.status).toBe(404);
+  });
+
   it("autorise un terminal libre à passer de la projection au dessin", async () => {
     const roomResponse = await workerFetch("https://example.test/api/rooms", {
       method: "POST",

@@ -6,8 +6,8 @@ L’interface peut être installée et son enveloppe statique reste disponible h
 
 ## Parcours utilisateur actuel
 
-- L'accueil et les écrans applicatifs hors dessin occupent deux moitiés de 50 % du viewport : superposées sur mobile ou en portrait, côte à côte sur desktop paysage. Chaque moitié défile indépendamment lorsque son contenu est plus long.
-- La création place QR code et lien direct en haut, puis joueurs, difficulté, nombre de manches, durée et démarrage en bas. Les thèmes restent internes au catalogue; il n'existe ni choix de thème ni bouton « Enregistrer ». « Démarrer la partie » reste indisponible tant qu'un projecteur et un autre téléphone de dessin ne sont pas connectés.
+- L'accueil et les écrans applicatifs hors dessin occupent deux moitiés de 50 % du viewport : superposées sur mobile ou en portrait, côte à côte sur desktop paysage. Les actions essentielles restent visibles sans défilement ; les joueurs, réglages et classement s'ouvrent dans des modales compactes.
+- La création place QR code et lien direct dans la première moitié, avec l’état des appareils et le bouton de démarrage toujours visibles. La seconde moitié ouvre les joueurs et réglages dans des modales compactes. Les thèmes restent internes au catalogue; il n'existe ni choix de thème ni bouton « Enregistrer ». « Démarrer la partie » reste indisponible tant qu'un projecteur et un autre téléphone de dessin ne sont pas connectés.
 - La saisie d’un code utilise six cases, convertit les lettres en majuscules, écarte les caractères ambigus et rejoint automatiquement la salle au sixième caractère.
 - Le lien et le QR code utilisent l’URL directe `/?join=CODE`. L’ouverture de cette URL préremplit le code et tente immédiatement la connexion.
 - L’écran du dessinateur est l'exception au 50/50 : une barre toujours visible regroupe le crayon, la gomme, l’épaisseur, annuler, rétablir et l’effacement confirmé au-dessus du canevas. Une action pleine largeur en bas interrompt la manche et ouvre la sélection du gagnant.

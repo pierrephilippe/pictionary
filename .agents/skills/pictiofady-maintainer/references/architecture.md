@@ -33,10 +33,11 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 
 - Phases : `lobby -> awaiting_ready -> armed -> drawing -> resolving -> revealing -> finished`. `resolving` fige la toile après le chrono et attend une décision explicite du dessinateur; les alarmes font progresser ou expirer la salle côté serveur.
 - Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }`. Le Durable Object exige alors un projecteur WebSocket actif et un autre terminal actif en mode dessin; une session HTTP simplement créée ne compte pas.
-- Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, dessine puis résout la manche.
+- Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, puis peut dessiner ou résoudre immédiatement la manche.
 - Le serveur recalcule toutes les capacités (`canDraw`, `canTakeDrawingTurn`, `canSelectWinner`) et refuse toute commande hors rôle, session, tour ou phase.
 - Une seule résolution est admise. Le joueur désigné par le dessinateur devient toujours le dessinateur suivant; « Aucun gagnant » choisit aléatoirement un autre joueur. Les scores et le prochain dessinateur sont calculés par le serveur, jamais par le client.
 - Après `finished`, seul le contrôleur peut envoyer `return_to_lobby`. La transition conserve joueurs, réglages et séquence de tours, mais remet scores, manche, gagnants et mots utilisés à zéro avant une nouvelle préparation.
+- Seul le contrôleur peut envoyer `delete_room`. Cette destruction efface l'état durable et l'alarme, ferme chaque WebSocket avec la raison `Room deleted`, puis interdit toute nouvelle invitation, tout ticket et toute reprise de la salle.
 
 ## Invariants de synchronisation
 

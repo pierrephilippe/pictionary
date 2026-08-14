@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   DIFFICULTIES,
   DURATIONS,
@@ -155,10 +155,10 @@ function PhaseCountdown({ deadlineAt, serverNow, label }: { deadlineAt: number; 
   return <div className={`phase-countdown${urgent ? " is-urgent" : ""}`} role="timer" aria-label={`${label} : ${formatTime(remaining ?? 0)}`}><span>{label}</span><strong>{formatTime(remaining ?? 0)}</strong></div>;
 }
 
-function Scoreboard({ snapshot, compact = false }: { snapshot: RoomSnapshot; compact?: boolean }) {
+function Scoreboard({ snapshot, compact = false, dialog = false }: { snapshot: RoomSnapshot; compact?: boolean; dialog?: boolean }) {
   const sorted = [...snapshot.players].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "fr"));
   return (
-    <ol className={`scoreboard${compact ? " scoreboard--compact" : ""}`} aria-label="Classement">
+    <ol className={`scoreboard${compact ? " scoreboard--compact" : ""}${dialog ? " scoreboard--dialog" : ""}`} aria-label="Classement">
       {sorted.map((player) => {
         const isDrawer = snapshot.phase !== "finished" && snapshot.turn?.drawerId === player.id;
         return (
@@ -215,10 +215,27 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
   const lastFlushRef = useRef(0);
   const draftFrameRef = useRef<number | null>(null);
   const clearTimerRef = useRef<number | null>(null);
+  const pointerPreviewRef = useRef<HTMLDivElement>(null);
   const winnerTriggerRef = useRef<HTMLButtonElement>(null);
   const winnerCloseRef = useRef<HTMLButtonElement>(null);
   const winnerSheetRef = useRef<HTMLDivElement>(null);
   const turn = snapshot.turn;
+
+  const hidePointerPreview = (): void => {
+    pointerPreviewRef.current?.classList.remove("is-visible");
+  };
+
+  const showPointerPreview = (target: HTMLCanvasElement, clientX: number, clientY: number): void => {
+    const preview = pointerPreviewRef.current;
+    if (!preview) return;
+    const canvasBounds = target.getBoundingClientRect();
+    const shellBounds = preview.parentElement?.getBoundingClientRect() ?? canvasBounds;
+    const x = Math.min(canvasBounds.right, Math.max(canvasBounds.left, clientX));
+    const y = Math.min(canvasBounds.bottom, Math.max(canvasBounds.top, clientY));
+    preview.style.setProperty("--drawing-pointer-x", `${x - shellBounds.left}px`);
+    preview.style.setProperty("--drawing-pointer-y", `${y - shellBounds.top}px`);
+    preview.classList.add("is-visible");
+  };
 
   const cancelClearConfirmation = (): void => {
     if (clearTimerRef.current) window.clearTimeout(clearTimerRef.current);
@@ -236,6 +253,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     startedRef.current = false;
     setDraft(null);
     setWinnerOpen(false);
+    hidePointerPreview();
     cancelClearConfirmation();
   }, [turn?.canvasRevision, turn?.id]);
   useEffect(() => {
@@ -247,6 +265,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     draftFrameRef.current = null;
     setDraft(null);
     setWinnerOpen(false);
+    hidePointerPreview();
     cancelClearConfirmation();
   }, [connected]);
   useEffect(() => {
@@ -260,6 +279,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     draftFrameRef.current = null;
     setDraft(null);
+    hidePointerPreview();
     cancelClearConfirmation();
   }, [snapshot.phase]);
   useEffect(() => {
@@ -342,6 +362,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
 
   const down = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     if (!connected || !snapshot.canDraw || !turn) return;
+    showPointerPreview(event.currentTarget, event.clientX, event.clientY);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -362,6 +383,11 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
   };
 
   const move = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    if (!connected || !snapshot.canDraw) {
+      hidePointerPreview();
+      return;
+    }
+    showPointerPreview(event.currentTarget, event.clientX, event.clientY);
     const active = activeRef.current;
     if (!active) return;
     const target = event.currentTarget;
@@ -387,9 +413,16 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     if (startedRef.current && performance.now() - lastFlushRef.current >= 80) flush(false);
   };
 
+  const enterCanvas = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    if (connected && snapshot.canDraw) showPointerPreview(event.currentTarget, event.clientX, event.clientY);
+  };
+
   const up = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     const active = activeRef.current;
-    if (!active) return;
+    if (!active) {
+      hidePointerPreview();
+      return;
+    }
     // A short tap is a legitimate drawing gesture: it creates a dot and, when
     // it is the first gesture, starts the authoritative game timer as well.
     if (!startedRef.current) {
@@ -411,6 +444,11 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     draftFrameRef.current = null;
     setDraft(null);
+    hidePointerPreview();
+  };
+
+  const leaveCanvas = (): void => {
+    if (!activeRef.current) hidePointerPreview();
   };
 
   const clear = (): void => {
@@ -444,7 +482,6 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
             <button type="button" disabled={!connected || !snapshot.canDraw} onClick={() => { if (turn) { haptic(6); send({ type: "redo", turnId: turn.id }); } }}>Rétablir</button>
             <button type="button" disabled={!connected || !snapshot.canDraw || !turn?.strokes.length} className={clearConfirmation ? "is-danger" : ""} onClick={clear}>{clearConfirmation ? "Confirmer l’effacement" : "Tout effacer"}</button>
           </div>
-          <div className="drawing-menu__footer"><p className="drawing-feedback" aria-live="polite">{clearConfirmation ? "Appuyez à nouveau pour effacer le dessin." : `${turn?.strokes.length ?? 0} trait${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} envoyé${(turn?.strokes.length ?? 0) > 1 ? "s" : ""} en direct.`}</p><details className="drawing-more-menu"><summary aria-label="Ouvrir les actions secondaires">Plus</summary><button type="button" className="drawing-menu__leave" onClick={onLeave}>Quitter la salle</button></details></div>
         </div>
       </div>
       <div className="drawing-canvas-shell">
@@ -452,17 +489,20 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
           strokes={turn?.strokes ?? []}
           draft={draft}
           inverse={false}
-          className="drawing-canvas"
+          className={`drawing-canvas${connected && snapshot.canDraw ? " is-drawable" : ""}`}
           ariaLabel={!connected ? "Zone de dessin en pause pendant la reconnexion" : snapshot.canDraw ? "Zone de dessin tactile" : "Dessin figé en attente de la décision du dessinateur"}
           ariaDisabled={!connected || !snapshot.canDraw}
           onPointerDown={down}
+          onPointerEnter={enterCanvas}
           onPointerMove={move}
           onPointerUp={up}
+          onPointerLeave={leaveCanvas}
         />
+        <div ref={pointerPreviewRef} className={`drawing-pointer drawing-pointer--${tool}`} style={{ "--drawing-pointer-size": `${Math.round(14 + width * 0.75)}px` } as CSSProperties} aria-hidden="true" />
         {!connected ? <div className="drawing-offline" role="status"><strong>Dessin en pause</strong><span>{connectionMessage ?? "Reconnexion en cours. Reprenez votre trait quand la connexion revient."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
       </div>
-      {["drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>{snapshot.phase === "resolving" ? "Désigner le gagnant" : "Interrompre la manche et désigner le gagnant"}</button></div> : null}
-      {winnerOpen && ["drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="winner-sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="winner-selection-title" onKeyDown={keepWinnerFocus} onMouseDown={(event) => { if (snapshot.phase === "drawing" && event.target === event.currentTarget) closeWinner(); }}><div ref={winnerSheetRef} className="winner-sheet" tabIndex={-1}>{snapshot.phase === "drawing" ? <button ref={winnerCloseRef} type="button" className="winner-sheet__close" aria-label="Fermer la sélection du gagnant" onClick={closeWinner}>×</button> : null}<WinnerSelection snapshot={snapshot} connected={connected} send={send} /></div></div> : null}
+      {["armed", "drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button type="button" className="drawing-round-action__leave" onClick={onLeave}>Quitter</button><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>{snapshot.phase === "resolving" ? "Désigner le gagnant" : "Interrompre la manche et désigner le gagnant"}</button></div> : null}
+      {winnerOpen && ["armed", "drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="winner-sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="winner-selection-title" onKeyDown={keepWinnerFocus} onMouseDown={(event) => { if (snapshot.phase !== "resolving" && event.target === event.currentTarget) closeWinner(); }}><div ref={winnerSheetRef} className="winner-sheet" tabIndex={-1}>{snapshot.phase !== "resolving" ? <button ref={winnerCloseRef} type="button" className="winner-sheet__close" aria-label="Fermer la sélection du gagnant" onClick={closeWinner}>×</button> : null}<WinnerSelection snapshot={snapshot} connected={connected} send={send} /></div></div> : null}
     </section>
   );
 }
@@ -470,37 +510,38 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
 function TerminalScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
   const isDrawer = snapshot.canDraw || snapshot.canSelectWinner;
   const turn = snapshot.turn;
+  const [scoreOpen, setScoreOpen] = useState(false);
   if (isDrawer && ["armed", "drawing", "resolving"].includes(snapshot.phase)) {
     return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} connected={connected} connectionMessage={connectionMessage} reconnectLabel={reconnectLabel} onReconnect={onReconnect} send={send} onLeave={onLeave} /></main>;
   }
   return (
     <main className="role-screen player-screen screen-split">
       <section className="screen-half screen-half--primary">
-        <div className="screen-half__content">
+        <div className="screen-half__content terminal-primary">
           <RoomHeader snapshot={snapshot} label="Téléphone de dessin" />
-          <GameStatus snapshot={snapshot} />
-          {snapshot.phase === "lobby" ? <section className="status-card"><p className="eyebrow">Téléphone connecté</p><h1>Prêt pour dessiner</h1><p>L’organisateur peut maintenant ajouter les joueurs et démarrer la partie.</p></section> : null}
+          {!['awaiting_ready', 'revealing', 'finished'].includes(snapshot.phase) ? <GameStatus snapshot={snapshot} /> : null}
           {snapshot.phase === "finished" ? <Finished snapshot={snapshot} /> : null}
           {snapshot.phase === "awaiting_ready" && !isDrawer && snapshot.canTakeDrawingTurn && turn ? (
-            <section className="status-card"><p className="eyebrow">Manche {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><p>Donnez ce téléphone à {turn.drawerName}, puis démarrez sa manche.</p><button className="button button--primary" disabled={!connected} onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
+            <section className="status-card"><p className="eyebrow">Manche {turn.round}/{snapshot.settings.rounds}</p><h1>{turn.drawerName} doit dessiner</h1><button className="button button--primary" disabled={!connected} onClick={() => send({ type: "take_drawing_turn", turnId: turn.id })}>Utiliser ce téléphone</button></section>
           ) : null}
           {snapshot.phase === "awaiting_ready" && !isDrawer && !snapshot.canTakeDrawingTurn ? (
             <section className="status-card"><p className="eyebrow">En attente</p><h1>{turn ? `${turn.drawerName} prépare son dessin` : "La partie se prépare"}</h1><p>Cette manche utilise déjà un autre téléphone.</p></section>
           ) : null}
           {snapshot.phase === "awaiting_ready" && isDrawer ? (
-            <section className="status-card"><p className="eyebrow">C’est à vous</p><h1>Prêt·e à dessiner ?</h1><p>Le mot sera affiché uniquement sur ce téléphone. Sans réponse, un autre joueur sera choisi dans <Timer deadlineAt={turn?.readyDeadlineAt ?? null} serverNow={snapshot.serverNow} />.</p><button className="button button--primary" disabled={!connected} onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
+            <section className="status-card"><p className="eyebrow">C’est à vous</p><h1>Prêt·e à dessiner ?</h1><p><Timer deadlineAt={turn?.readyDeadlineAt ?? null} serverNow={snapshot.serverNow} /></p><button className="button button--primary" disabled={!connected} onClick={() => turn && send({ type: "ready", turnId: turn.id })}>Je suis prêt·e</button></section>
           ) : null}
           {snapshot.phase === "revealing" ? <Reveal snapshot={snapshot} /> : null}
         </div>
       </section>
       <section className="screen-half screen-half--secondary">
-        <div className="screen-half__content">
-          <Scoreboard snapshot={snapshot} />
-          <section className="terminal-mode-card"><div><strong>Ce téléphone peut aussi projeter</strong><p>Le mode projection utilise le plexiglas en V à deux faces.</p></div><button disabled={isDrawer || !connected} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Passer en mode projecteur</button>{isDrawer ? <small>Le téléphone du dessinateur reste disponible jusqu’à la fin de la manche.</small> : null}</section>
-          {snapshot.phase === "finished" ? <p className="terminal-replay-note">L’organisateur peut préparer une nouvelle partie depuis le projecteur.</p> : null}
+        <div className="screen-half__content terminal-controls">
+          <div><p className="eyebrow">Actions</p><h2>Ce téléphone</h2></div>
+          <div className="terminal-controls__actions"><button type="button" onClick={() => setScoreOpen(true)}>Classement <span>{snapshot.players.length}</span></button><button disabled={isDrawer || !connected} onClick={() => send({ type: "set_display_mode", displayMode: "projection" })}>Mode projecteur</button></div>
+          {snapshot.phase === "finished" ? <p className="terminal-replay-note">L’organisateur peut préparer une nouvelle partie.</p> : null}
           <button type="button" className="room-leave-button" onClick={onLeave}>Quitter la salle</button>
         </div>
       </section>
+      {scoreOpen ? <OverlayDialog label="Classement" onClose={() => setScoreOpen(false)}><Scoreboard snapshot={snapshot} dialog /></OverlayDialog> : null}
     </main>
   );
 }
@@ -561,21 +602,61 @@ function ToggleList<T extends string>({
   return <div className="toggle-list" role="group" aria-label="Difficultés des mots, plusieurs choix possibles">{values.map((value) => <button key={value} type="button" className={selected.includes(value) ? "selected" : ""} aria-pressed={selected.includes(value)} onClick={() => toggle(value)}>{label(value)}</button>)}</div>;
 }
 
-function ControllerScreen({ snapshot, connected, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand; onLeave: () => void }) {
+function OverlayDialog({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+    return () => returnFocusRef.current?.focus();
+  }, []);
+  const keepFocusInside = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex='-1'])") ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  return <section className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className="app-modal" role="dialog" aria-modal="true" aria-label={label} onKeyDown={keepFocusInside}><header className="app-modal__header"><h2>{label}</h2><button ref={closeRef} type="button" aria-label={`Fermer ${label}`} onClick={onClose}>×</button></header>{children}</div></section>;
+}
+
+function DeleteRoomDialog({ connected, onDelete, onClose }: { connected: boolean; onDelete: () => boolean; onClose: () => void }) {
+  const [deleting, setDeleting] = useState(false);
+  const deleteRoom = (): void => {
+    if (onDelete()) setDeleting(true);
+  };
+  return <OverlayDialog label="Supprimer la partie" onClose={onClose}><div className="delete-room-dialog"><p>La salle sera supprimée définitivement et tous les téléphones encore connectés seront déconnectés.</p><div className="delete-room-dialog__actions"><button type="button" disabled={deleting} onClick={onClose}>Annuler</button><button type="button" className="button--danger" disabled={!connected || deleting} onClick={deleteRoom}>{deleting ? "Suppression…" : "Supprimer la partie"}</button></div></div></OverlayDialog>;
+}
+
+function PlayerEditor({ snapshot, connected, send, playerName, onPlayerNameChange }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand; playerName: string; onPlayerNameChange: (value: string) => void }) {
+  return <div className="player-editor"><form className="player-editor__form" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; if (send({ type: "add_player", name: playerName })) onPlayerNameChange(""); }}><label>Nom du joueur<input name="player-name" value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => onPlayerNameChange(event.target.value)} /></label><button type="submit" className="button button--primary" disabled={!connected || playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form><p className="modal-summary">{snapshot.players.length}/12 joueurs</p>{snapshot.players.length > 0 ? <ul className="player-editor__list">{snapshot.players.map((player) => <li key={player.id}><button type="button" disabled={!connected} aria-label={`Retirer ${player.name} de la partie`} onClick={() => send({ type: "remove_player", playerId: player.id })}><span>{player.name}</span><b aria-hidden="true">×</b></button></li>)}</ul> : <p className="modal-summary">Ajoutez le premier joueur.</p>}</div>;
+}
+
+function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand }) {
   const [settings, setSettings] = useState<Settings>(snapshot.settings);
   const [playerName, setPlayerName] = useState("");
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [playersOpen, setPlayersOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
   const launchPendingRef = useRef(false);
   const launchTimerRef = useRef<number | null>(null);
   useEffect(() => () => {
     if (launchTimerRef.current !== null) window.clearTimeout(launchTimerRef.current);
   }, []);
-  useEffect(() => {
-    if (!copyFeedback) return undefined;
-    const timer = window.setTimeout(() => setCopyFeedback(null), 2_500);
-    return () => window.clearTimeout(timer);
-  }, [copyFeedback]);
   const toggleDifficulty = (value: Difficulty): void => {
     setSettings((previous) => {
       const list = previous.difficulties;
@@ -584,15 +665,6 @@ function ControllerScreen({ snapshot, connected, send, onLeave }: { snapshot: Ro
     });
   };
   const joinUrl = `${window.location.origin}/?join=${snapshot.code}`;
-  const copyJoinLink = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(joinUrl);
-      haptic(8);
-      setCopyFeedback("Lien direct copié !");
-    } catch {
-      setCopyFeedback("Copie indisponible : scannez le QR code ou saisissez le code.");
-    }
-  };
   const launch = (): void => {
     if (!connected || launchPendingRef.current) return;
     launchPendingRef.current = true;
@@ -625,40 +697,33 @@ function ControllerScreen({ snapshot, connected, send, onLeave }: { snapshot: Ro
   return (
     <main className="role-screen controller-screen screen-split">
       <section className="screen-half screen-half--invite">
-        <div className="screen-half__content">
-          <RoomHeader snapshot={snapshot} label="Préparation" />
-          <section className="join-card">
-            <div><p className="eyebrow">Inviter les téléphones</p><h1>{snapshot.code}</h1><p>Le QR code et le lien ouvrent directement cette salle.</p><a className="join-direct-link" href={joinUrl}>{joinUrl}</a><button className="link-button" type="button" onClick={() => void copyJoinLink()}>Copier le lien direct</button>{copyFeedback ? <p className="copy-feedback" role="status">{copyFeedback}</p> : null}</div>
-            <figure className="join-qr" role="img" aria-label={`QR code pour rejoindre directement la salle ${snapshot.code}`}><Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense><figcaption className="sr-only">Scannez pour rejoindre directement la salle {snapshot.code}.</figcaption></figure>
-          </section>
-        </div>
-      </section>
-      <section className="screen-half screen-half--setup">
-        <div className="screen-half__content screen-half__content--setup">
-          <div className="setup-scroll">
-            <section className="settings-card">
-              <form className="button-row" onSubmit={(event) => { event.preventDefault(); if (!playerName.trim()) return; if (send({ type: "add_player", name: playerName })) setPlayerName(""); }}><label>Nom du joueur<input name="player-name" value={playerName} placeholder="ex. Lila" maxLength={24} onChange={(event) => setPlayerName(event.target.value)} /></label><button type="submit" disabled={!connected || playerName.trim().length < 2 || snapshot.players.length >= 12}>Ajouter</button></form>
-              <Participants snapshot={snapshot} connected={connected} send={send} />
-              <h2>Réglages de la partie</h2>
-              <div className="settings-fields"><label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label><label>Nombre de manches <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} manches</option>)}</select></label></div>
-              <h3>Difficultés des mots <small>Plusieurs choix possibles</small></h3>
-              <ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={toggleDifficulty} label={(value) => value[0]!.toUpperCase() + value.slice(1)} />
+        <div className="screen-half__content screen-half__content--invite">
+          <div className="invite-scroll">
+            <RoomHeader snapshot={snapshot} label="Préparation" />
+            <section className="join-card">
+              <div><p className="eyebrow">Inviter les téléphones</p><h1>{snapshot.code}</h1><a className="sr-only" href={joinUrl}>Lien direct pour rejoindre la salle {snapshot.code}</a></div>
+              <figure className="join-qr" role="img" aria-label={`QR code pour rejoindre directement la salle ${snapshot.code}`}><Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense><figcaption className="sr-only">Scannez pour rejoindre directement la salle {snapshot.code}.</figcaption></figure>
             </section>
           </div>
-          <footer className="setup-actions">
+          <footer className="invite-actions">
             <div className="device-readiness" aria-live="polite"><span className={snapshot.devicePresence.projectors > 0 ? "is-ready" : ""}>Projecteur {snapshot.devicePresence.projectors > 0 ? "prêt" : "absent"}</span><span className={snapshot.devicePresence.drawingPhones > 0 ? "is-ready" : ""}>Téléphone de dessin {snapshot.devicePresence.drawingPhones > 0 ? "prêt" : "absent"}</span></div>
             <p id="launch-help" className="launch-help">{launchHelp}</p>
             <button className="button button--primary" aria-describedby="launch-help" disabled={!canLaunch} onClick={launch}>{launching ? "Lancement…" : "Démarrer la partie"}</button>
-            <button type="button" className="room-leave-button" onClick={onLeave}>Quitter la salle</button>
           </footer>
         </div>
       </section>
+      <section className="screen-half screen-half--setup">
+        <div className="screen-half__content setup-overview">
+          <div><p className="eyebrow">Préparer la partie</p><h2>Joueurs et réglages</h2><p className="setup-summary">{settings.durationSeconds} s · {settings.rounds} manches · {settings.difficulties.length} niveau{settings.difficulties.length > 1 ? "x" : ""}</p></div>
+          <div className="setup-overview__actions"><button type="button" className={`setup-players-button${snapshot.players.length === 0 ? " is-needed" : ""}`} aria-label={`Gérer les joueurs : ${snapshot.players.length} sur 12${snapshot.players.length === 0 ? ". Ajoutez le premier joueur." : ""}`} onClick={() => setPlayersOpen(true)}><span>Joueurs</span><strong><b>{snapshot.players.length}</b><small>/12</small></strong>{snapshot.players.length === 0 ? <em>Ajouter un joueur</em> : null}</button><button type="button" onClick={() => setSettingsOpen(true)}>Réglages</button></div>
+          <button type="button" className="room-delete-button" onClick={() => setDeleteOpen(true)}>Supprimer la partie</button>
+        </div>
+      </section>
+      {playersOpen ? <OverlayDialog label="Joueurs" onClose={() => setPlayersOpen(false)}><PlayerEditor snapshot={snapshot} connected={connected} send={send} playerName={playerName} onPlayerNameChange={setPlayerName} /></OverlayDialog> : null}
+      {settingsOpen ? <OverlayDialog label="Réglages de la partie" onClose={() => setSettingsOpen(false)}><div className="settings-editor"><div className="settings-fields"><label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label><label>Nombre de manches <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} manches</option>)}</select></label></div><h3>Difficultés des mots</h3><ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={toggleDifficulty} label={(value) => value[0]!.toUpperCase() + value.slice(1)} /></div></OverlayDialog> : null}
+      {deleteOpen ? <DeleteRoomDialog connected={connected} onDelete={() => send({ type: "delete_room" })} onClose={() => setDeleteOpen(false)} /> : null}
     </main>
   );
-}
-
-function Participants({ snapshot, connected, send }: { snapshot: RoomSnapshot; connected: boolean; send: SendCommand }) {
-  return <section className="participants"><h2>Joueurs inscrits ({snapshot.players.length}/12)</h2>{snapshot.players.length === 0 ? <p className="participants__empty">Ajoutez au moins un joueur pour lancer la partie.</p> : <ul className="participant-list">{snapshot.players.map((player) => <li key={player.id}><span>{player.name}</span><button type="button" disabled={!connected} aria-label={`Retirer ${player.name} de la partie`} onClick={() => send({ type: "remove_player", playerId: player.id })}>Retirer</button></li>)}</ul>}{snapshot.players.length >= 12 ? <p className="participants__full" role="status">La salle est complète.</p> : null}</section>;
 }
 
 function Reveal({ snapshot }: { snapshot: RoomSnapshot }) {
@@ -722,13 +787,14 @@ const exitProjectionFullscreen = async (): Promise<void> => {
   }
 };
 
-function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, onLeave, onUseDrawingTerminal, onPrepareNewGame }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; onLeave: () => void; onUseDrawingTerminal?: () => void; onPrepareNewGame?: () => boolean }) {
+function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, onLeave, onUseDrawingTerminal, onPrepareNewGame, onDeleteRoom }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; onLeave: () => void; onUseDrawingTerminal?: () => void; onPrepareNewGame?: () => boolean; onDeleteRoom?: () => boolean }) {
   const [calibration, setCalibration] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [drawingControlsVisible, setDrawingControlsVisible] = useState(false);
   const [immersive, setImmersive] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [preparingNewGame, setPreparingNewGame] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mountedRef = useRef(false);
   const fullscreenOperationRef = useRef(0);
@@ -750,6 +816,10 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     setSettingsOpen(false);
     window.requestAnimationFrame(() => settingsTriggerRef.current?.focus());
   }, []);
+  const openDeleteRoom = useCallback((): void => {
+    closeSettings();
+    setDeleteOpen(true);
+  }, [closeSettings]);
   const queueFullscreenAction = useCallback((action: () => Promise<void>): Promise<void> => {
     const request = fullscreenQueueRef.current.catch(() => undefined).then(action);
     fullscreenQueueRef.current = request.catch(() => undefined);
@@ -900,11 +970,12 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     {presentationMode && !isDrawing ? <div className="projection-presentation-actions">{onPrepareNewGame && snapshot.phase === "finished" ? <button disabled={!connected || preparingNewGame} onClick={prepareNewGame}>{preparingNewGame ? "Préparation…" : "Nouvelle partie"}</button> : null}{onUseDrawingTerminal ? <button aria-label="Passer en mode dessin" onClick={onUseDrawingTerminal}>Dessin</button> : null}<button aria-label="Ouvrir les réglages de projection" onClick={openSettings}>Réglages</button><button aria-label="Quitter le plein écran" onClick={() => void exitFullscreen()}>Quitter</button></div> : null}
     {isDrawing && drawingControlsVisible ? <div className="projection-drawing-actions" role="toolbar" aria-label="Contrôles temporaires de projection" onPointerUp={(event) => event.stopPropagation()}>{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button>{presentationMode ? <button onClick={() => void exitFullscreen()}>Quitter le plein écran</button> : null}</div> : null}
     {isDrawing && !connected ? <div className="projection-interrupted" role="alert"><strong>Projection interrompue</strong><span>{connectionMessage ?? "La connexion à la partie est perdue."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
-    {settingsOpen ? <ProjectionSettings snapshot={snapshot} calibration={calibration} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onLeave={onLeave} onClose={closeSettings} /> : null}
+    {settingsOpen ? <ProjectionSettings snapshot={snapshot} calibration={calibration} onCalibrationChange={setCalibration} onUseDrawingTerminal={onUseDrawingTerminal} onLeave={onLeave} onDeleteRoom={onDeleteRoom ? openDeleteRoom : undefined} onClose={closeSettings} /> : null}
+    {deleteOpen && onDeleteRoom ? <DeleteRoomDialog connected={connected} onDelete={onDeleteRoom} onClose={() => setDeleteOpen(false)} /> : null}
   </main>;
 }
 
-function ProjectionSettings({ snapshot, calibration, onCalibrationChange, onUseDrawingTerminal, onLeave, onClose }: { snapshot: RoomSnapshot; calibration: boolean; onCalibrationChange: (value: boolean) => void; onUseDrawingTerminal?: () => void; onLeave: () => void; onClose: () => void }) {
+function ProjectionSettings({ snapshot, calibration, onCalibrationChange, onUseDrawingTerminal, onLeave, onDeleteRoom, onClose }: { snapshot: RoomSnapshot; calibration: boolean; onCalibrationChange: (value: boolean) => void; onUseDrawingTerminal?: () => void; onLeave: () => void; onDeleteRoom?: () => void; onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => closeRef.current?.focus(), []);
@@ -930,15 +1001,9 @@ function ProjectionSettings({ snapshot, calibration, onCalibrationChange, onUseD
   return <section className="projection-settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="projection-settings-title" onKeyDown={keepFocusInside} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div ref={panelRef} className="projection-settings-panel">
       <div className="projection-settings-heading"><div><p className="eyebrow">Projection</p><h1 id="projection-settings-title">Réglages</h1></div><button ref={closeRef} className="projection-settings-close" aria-label="Fermer les réglages" onClick={onClose}>×</button></div>
-      <p className="projection-support-summary">Plexiglas en V · 2 faces</p>
       <button onClick={() => onCalibrationChange(!calibration)}>{calibration ? "Voir le jeu" : "Afficher la mire"}</button>
-      <section className="projection-game-summary" aria-label="Réglages de la partie">
-        <h2>Partie en cours</h2>
-        <dl><div><dt>Durée</dt><dd>{snapshot.settings.durationSeconds} secondes</dd></div><div><dt>Manches</dt><dd>{snapshot.settings.rounds}</dd></div><div><dt>Difficulté</dt><dd>{snapshot.settings.difficulties.join(", ")}</dd></div></dl>
-        <p>Les règles sont verrouillées après le lancement afin de préserver la manche en cours.</p>
-      </section>
       {onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Revenir au mode dessin</button> : null}
-      <button type="button" className="projection-settings-leave" onClick={onLeave}>Quitter la salle</button>
+      {onDeleteRoom ? <button type="button" className="projection-settings-leave" onClick={onDeleteRoom}>Supprimer la partie</button> : <button type="button" className="projection-settings-leave" onClick={onLeave}>Quitter la salle</button>}
       <button className="button button--primary" onClick={onClose}>Reprendre la projection</button>
     </div>
   </section>;
@@ -950,14 +1015,6 @@ function CalibrationMark({ number }: { number: number }) {
 
 function RoomHeader({ snapshot, label }: { snapshot: RoomSnapshot; label: string }) {
   return <header className="room-header"><div><span className="brand">PICTIOFADY</span><span className="room-label">{label}</span></div><div><span className="room-code">{snapshot.code}</span><span className="status-dot">en direct</span></div></header>;
-}
-
-function PwaInstallCard({ pwa }: { pwa: PwaControls }) {
-  if (pwa.isInstalled || (!pwa.canInstall && !pwa.isAppleMobile)) return null;
-  return <aside className="pwa-install-card" aria-label="Installer PictioFady">
-    <div><span className="pwa-install-card__icon" aria-hidden="true">◇</span><p className="eyebrow">Mode application</p><strong>Gardez PictioFady à portée de main.</strong><p>{pwa.isAppleMobile && !pwa.canInstall ? "Sur iPhone ou iPad : touchez Partager, puis « Sur l’écran d’accueil »." : "Installez l’application pour ouvrir plus vite la projection et profiter du plein écran."}</p></div>
-    {pwa.canInstall ? <button type="button" className="button button--primary" onClick={() => void pwa.install()}>Installer</button> : null}
-  </aside>;
 }
 
 function PwaUpdateNotice({ pwa }: { pwa: PwaControls }) {
@@ -1035,7 +1092,7 @@ function JoinCodeInput({ value, disabled, onChange }: { value: string; disabled:
   </fieldset>;
 }
 
-function Home({ onSession, pwa }: { onSession: (session: StoredSession) => void; pwa: PwaControls }) {
+function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
   const [code, setCode] = useState(directJoinCode);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1069,7 +1126,7 @@ function Home({ onSession, pwa }: { onSession: (session: StoredSession) => void;
     setError(null);
     setCode(nextCode);
   };
-  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><p>Préparez les joueurs, choisissez la difficulté, le nombre de manches et leur durée.</p><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><span className="brand">PICTIOFADY</span><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} /><p className="subtle">La connexion se lance automatiquement dès que les 6 caractères sont saisis.</p>{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <div className="join-error"><p className="error-message" role="alert">{error}</p>{code.length === ROOM_CODE_LENGTH ? <button type="button" disabled={busy} onClick={() => { attemptedCodeRef.current = null; void join(code); }}>Réessayer</button> : null}</div> : null}<PwaInstallCard pwa={pwa} /></section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} />{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <div className="join-error"><p className="error-message" role="alert">{error}</p>{code.length === ROOM_CODE_LENGTH ? <button type="button" disabled={busy} onClick={() => { attemptedCodeRef.current = null; void join(code); }}>Réessayer</button> : null}</div> : null}</section></main>;
 }
 
 export function App() {
@@ -1078,7 +1135,7 @@ export function App() {
   const { snapshot, connectionError, connected, retry, send, sessionUnavailable } = useRoomConnection(session);
   const adoptSession = (next: StoredSession): void => { saveSession(next); setSession(next); };
   const leave = (): void => { saveSession(null); setSession(null); };
-  if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} pwa={pwa} /></>;
+  if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} /></>;
   if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading screen-split"><section className="screen-half screen-half--primary"><div className="screen-half__content"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1></div></section><section className="screen-half screen-half--secondary"><div className="screen-half__content"><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></div></section></main></>;
   const reconnectAction = sessionUnavailable ? leave : retry;
   const reconnectLabel = sessionUnavailable ? "Retour à l’accueil" : "Réessayer";
@@ -1088,5 +1145,5 @@ export function App() {
   );
   const projectionDrawingActive = snapshot.phase === "drawing" && (session.role === "controller" || snapshot.displayMode === "projection");
   const hideGlobalConnection = drawingTerminalActive || projectionDrawingActive;
-  return <>{!["drawing", "resolving"].includes(snapshot.phase) ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} onLeave={leave} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onPrepareNewGame={connected ? () => send({ type: "return_to_lobby" }) : undefined} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
+  return <>{!["drawing", "resolving"].includes(snapshot.phase) ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onPrepareNewGame={connected ? () => send({ type: "return_to_lobby" }) : undefined} onDeleteRoom={connected ? () => send({ type: "delete_room" }) : undefined} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
 }

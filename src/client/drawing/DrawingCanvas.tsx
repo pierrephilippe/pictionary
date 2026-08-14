@@ -8,8 +8,10 @@ interface DrawingCanvasProps {
   inverse: boolean;
   className?: string;
   onPointerDown?: (event: PointerEvent<HTMLCanvasElement>) => void;
+  onPointerEnter?: (event: PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove?: (event: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (event: PointerEvent<HTMLCanvasElement>) => void;
+  onPointerLeave?: (event: PointerEvent<HTMLCanvasElement>) => void;
   ariaLabel?: string;
   ariaDisabled?: boolean;
 }
@@ -20,8 +22,10 @@ export function DrawingCanvas({
   inverse,
   className,
   onPointerDown,
+  onPointerEnter,
   onPointerMove,
   onPointerUp,
+  onPointerLeave,
   ariaLabel,
   ariaDisabled,
 }: DrawingCanvasProps) {
@@ -100,9 +104,11 @@ export function DrawingCanvas({
       aria-label={ariaLabel}
       aria-disabled={ariaDisabled}
       onPointerDown={onPointerDown}
+      onPointerEnter={onPointerEnter}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onPointerLeave={onPointerLeave}
     />
   );
 }

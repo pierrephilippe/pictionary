@@ -337,7 +337,7 @@ function reveal(state: RoomState, now: number): void {
 
 export function selectWinner(state: RoomState, terminalSessionId: string, winnerId: string, now: number): void {
   const current = state.current;
-  if (!["drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
+  if (!["armed", "drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
   assertDrawerTerminal(state, terminalSessionId);
   if (current.drawerId === winnerId) throw new GameRuleError("Le dessinateur ne peut pas valider son propre point.");
   const winner = getPlayer(state, winnerId);
@@ -351,7 +351,7 @@ export function selectWinner(state: RoomState, terminalSessionId: string, winner
 
 export function noWinner(state: RoomState, terminalSessionId: string, now: number, random: () => number): void {
   const current = state.current;
-  if (!["drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
+  if (!["armed", "drawing", "resolving"].includes(state.phase) || !current) throw new GameRuleError("La manche ne peut plus être résolue.");
   assertDrawerTerminal(state, terminalSessionId);
   current.winnerId = null;
   current.nextDrawerId = chooseNextDrawer(state, current.drawerId, random).id;
@@ -427,7 +427,7 @@ export function snapshotFor(
     } : null,
     canDraw: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["awaiting_ready", "armed", "drawing"].includes(state.phase),
     canTakeDrawingTurn: canUseDrawingTerminal && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),
-    canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["drawing", "resolving"].includes(state.phase),
+    canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing", "resolving"].includes(state.phase),
     displayMode,
     devicePresence: structuredClone(devicePresence),
     secretWord: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing", "resolving"].includes(state.phase)
