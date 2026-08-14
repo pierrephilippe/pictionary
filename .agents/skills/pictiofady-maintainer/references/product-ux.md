@@ -4,8 +4,8 @@ Charge cette référence pour une modification d'écran, de contenu, de dessin, 
 
 ## Parcours à préserver
 
-- Accueil mobile : deux zones de même hauteur, « Créer une partie » et « Rejoindre une partie ». Sur grand écran, conserver une séparation 50/50 lisible.
-- Les écrans applicatifs hors dessin utilisent deux moitiés verticales de même hauteur, chacune défilable sans déplacer l'autre. La projection en V matérialise ses deux faces égales.
+- Accueil mobile et écrans en portrait : deux zones superposées de même hauteur, « Créer une partie » et « Rejoindre une partie ». Sur un écran desktop large en paysage, les placer côte à côte à 50 % de la largeur chacune.
+- Les écrans applicatifs hors dessin suivent le même responsive : deux moitiés superposées de même hauteur sur mobile ou en portrait, puis deux colonnes de même largeur sur desktop paysage. Chaque moitié défile sans déplacer l'autre. La projection en V matérialise ses deux faces égales.
 - Création : demander uniquement difficultés, nombre de manches et durée par manche. Ne proposer ni thème ni bouton ambigu « Enregistrer »; le CTA lance avec les réglages affichés.
 - Préparation : placer QR code et lien direct dans la moitié haute, puis joueurs, réglages et démarrage dans la moitié basse. Le démarrage exige un projecteur connecté et un autre téléphone connecté en mode dessin; annoncer chaque présence sans dépendre de la couleur.
 - Rejoindre : six cases tactiles, lettres normalisées en majuscules, caractères ambigus écartés, validation automatique au sixième caractère et action claire pour réessayer.
@@ -28,7 +28,7 @@ Charge cette référence pour une modification d'écran, de contenu, de dessin, 
 - Les contrôles techniques apparaissent brièvement après interaction puis disparaissent. Obtenir un geste utilisateur avant fullscreen si le navigateur l'exige.
 - Afficher informations, scores et consignes avant, entre et après les manches.
 - Pré-inverser chaque face horizontalement pour que la réflexion physique restitue le bon sens; ne pas appliquer un miroir global qui inverse aussi les repères techniques de calibration.
-- Ne proposer que le plexiglas en V : exactement deux faces carrées, rotations 90° et 270°, dans un stage 2:1. Portrait et paysage gardent cette même composition; seule l'échelle change. Ne jamais verrouiller l'orientation ni afficher de consigne de rotation.
+- Ne proposer que le plexiglas en V : exactement deux faces carrées empilées dans un stage 1:2. Ce rendu correspond à l'ancienne composition horizontale tournée de 90° dans le sens horaire : face haute à 180°, face basse à 0°. Portrait et paysage gardent cette même composition; seule l'échelle change. Ne jamais verrouiller l'orientation ni afficher de consigne de rotation.
 - Après `finished`, le contrôleur peut préparer une nouvelle partie avec les mêmes joueurs et réglages; les scores et l'historique des mots repartent de zéro.
 
 ## Style et accessibilité

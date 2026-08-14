@@ -6,7 +6,7 @@ L’interface peut être installée et son enveloppe statique reste disponible h
 
 ## Parcours utilisateur actuel
 
-- L'accueil et les écrans applicatifs hors dessin occupent deux moitiés verticales de 50 % du viewport. Chaque moitié défile indépendamment lorsque son contenu est plus long.
+- L'accueil et les écrans applicatifs hors dessin occupent deux moitiés de 50 % du viewport : superposées sur mobile ou en portrait, côte à côte sur desktop paysage. Chaque moitié défile indépendamment lorsque son contenu est plus long.
 - La création place QR code et lien direct en haut, puis joueurs, difficulté, nombre de manches, durée et démarrage en bas. Les thèmes restent internes au catalogue; il n'existe ni choix de thème ni bouton « Enregistrer ». « Démarrer la partie » reste indisponible tant qu'un projecteur et un autre téléphone de dessin ne sont pas connectés.
 - La saisie d’un code utilise six cases, convertit les lettres en majuscules, écarte les caractères ambigus et rejoint automatiquement la salle au sixième caractère.
 - Le lien et le QR code utilisent l’URL directe `/?join=CODE`. L’ouverture de cette URL préremplit le code et tente immédiatement la connexion.
@@ -61,7 +61,7 @@ Une salle accepte de 1 à 12 joueurs inscrits et jusqu’à 16 sessions de tél�
 
 Le dessinateur peut interrompre la manche dès qu’un joueur trouve. À la fin du chronomètre, le dessin se fige et la partie attend sa décision : s’il choisit « Aucun gagnant », personne ne marque et le prochain dessinateur est tiré au sort parmi les autres joueurs. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes. Le mot est ensuite révélé pendant cinq secondes avant l’enchaînement automatique.
 
-Le projecteur utilise uniquement un plexiglas en V à deux faces. Le stage reste au ratio 2:1 avec deux cellules carrées et les mêmes transformations en portrait comme en paysage; seule son échelle s'adapte à l'espace disponible. L'application ne verrouille pas l'orientation et n'affiche aucune consigne de rotation. Pour de meilleurs résultats, augmenter la luminosité, activer la projection et centrer le V sur la mire.
+Le projecteur utilise uniquement un plexiglas en V à deux faces. La composition est tournée de 90° dans le sens horaire : les deux cellules carrées sont empilées dans un stage 1:2, avec les mêmes transformations en portrait comme en paysage; seule son échelle s'adapte à l'espace disponible. L'application ne verrouille pas l'orientation et n'affiche aucune consigne de rotation. Pour de meilleurs résultats, augmenter la luminosité, activer la projection et centrer le V sur la mire.
 
 À la fin, le contrôleur peut préparer une nouvelle partie. Les joueurs et les réglages sont conservés, tandis que les scores, la manche courante, le classement final et l'historique des mots sont réinitialisés côté serveur.
 

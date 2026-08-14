@@ -1,6 +1,7 @@
 /**
  * The projection is rendered on the two reflective faces of a V support.
- * Rotations stay fixed so portrait and landscape viewports share the same
- * composition; CSS is responsible only for scaling the stage to fit.
+ * The former horizontal composition is rotated 90° clockwise as one unit:
+ * its left face becomes the top face and its right face the bottom one.
+ * Rotations stay fixed across viewport orientations; CSS only scales it.
  */
-export const VEE_FACE_ROTATIONS = [90, 270] as const;
+export const VEE_FACE_ROTATIONS = [180, 0] as const;

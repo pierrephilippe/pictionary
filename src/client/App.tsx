@@ -887,8 +887,8 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
       setPreparingNewGame(false);
     }, 2_500);
   };
-  // In a V support, each half of the display reflects into a lateral face.
-  // The views therefore point away from the shared ridge (left: 90°, right: 270°).
+  // The complete V composition is rotated 90° clockwise: the former left
+  // face is on top (180°) and the former right face is below (0°).
   return <main className={`projection-screen${presentationMode ? " projection-screen--immersive" : ""}${isDrawing ? " projection-screen--drawing" : ""}`}>
     <header className={`projection-header${presentationMode || isDrawing ? " projection-header--hidden" : ""}`}><div><span className="brand">PICTIOFADY</span><span className="connection">Salle {snapshot.code}</span></div><div className="projection-controls">{onPrepareNewGame && snapshot.phase === "finished" ? <button className="button button--primary" disabled={!connected || preparingNewGame} onClick={prepareNewGame}>{preparingNewGame ? "Préparation…" : "Préparer une nouvelle partie"}</button> : null}{onUseDrawingTerminal ? <button onClick={onUseDrawingTerminal}>Mode dessin</button> : null}<button onClick={openSettings}>Réglages</button><button className="button button--primary" onClick={() => void enterFullscreen()}>Activer la projection</button></div></header>
     <section className="projection-stage" aria-label={isDrawing ? "Projection du dessin. Touchez l’écran pour afficher brièvement les contrôles." : "Zone de projection en V à deux faces"} onPointerUp={() => { if (isDrawing) setDrawingControlsVisible(true); }}>
