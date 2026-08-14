@@ -15,7 +15,7 @@ const snapshot = (revision = 10): RoomSnapshot => ({
   code: "ABC234",
   revision,
   phase: "drawing",
-  settings: { durationSeconds: 60, rounds: 5, difficulties: ["facile"] },
+  settings: { durationSeconds: 60, rounds: 5, difficulty: "facile" },
   players: [{ id: "player-0001", name: "Lila", score: 0, joinedAt: 0 }],
   turn: {
     id: "turn-1",

@@ -23,12 +23,10 @@ const persistedStrokeSchema = z.object({
   points: z.array(pointSchema).min(1).max(1_024),
 }).strict();
 
-const uniqueValues = <T extends string>(values: T[]): boolean => new Set(values).size === values.length;
-
 const settingsSchema = z.object({
   durationSeconds: z.union(DURATIONS.map((value) => z.literal(value)) as [z.ZodLiteral<30>, z.ZodLiteral<60>, z.ZodLiteral<90>]),
   rounds: z.union(ROUND_COUNTS.map((value) => z.literal(value)) as [z.ZodLiteral<5>, z.ZodLiteral<10>, z.ZodLiteral<15>]),
-  difficulties: z.array(z.enum(DIFFICULTIES)).min(1).max(DIFFICULTIES.length).refine(uniqueValues),
+  difficulty: z.enum(DIFFICULTIES),
 }).strict();
 
 const turnCommand = { turnId: z.string().min(6).max(80) };

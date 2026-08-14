@@ -24,7 +24,16 @@ import {
   undo,
   clear,
 } from "../domain/game";
-import { DEFAULT_SETTINGS, type DevicePresence, type Role, type RoomState, type Session } from "../domain/types";
+import {
+  DEFAULT_SETTINGS,
+  DIFFICULTIES,
+  type DevicePresence,
+  type Difficulty,
+  type Role,
+  type RoomState,
+  type Session,
+  type Settings,
+} from "../domain/types";
 import { clientCommandSchema, type ClientCommand, type JoinRoomRequest, type ServerMessage } from "../shared/protocol";
 
 interface SocketAttachment {
@@ -46,6 +55,9 @@ const MAX_TERMINAL_SESSIONS = 16;
 const MAX_ROOM_SOCKETS = 20;
 const COMMAND_WINDOW_MS = 1_000;
 const MAX_COMMANDS_PER_WINDOW = 40;
+
+const isDifficulty = (value: unknown): value is Difficulty =>
+  typeof value === "string" && DIFFICULTIES.some((difficulty) => difficulty === value);
 
 class CommandRateLimitError extends GameRuleError {}
 
@@ -509,17 +521,26 @@ export class GameRoom extends DurableObject<Env> {
     if (!table) return null;
     const row = this.ctx.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").toArray()[0];
     if (!row) return null;
-    const state = JSON.parse(row.payload) as RoomState & {
-      version: 1 | 2;
-      settings: RoomState["settings"] & { themes?: unknown };
+    const persisted = JSON.parse(row.payload) as Omit<RoomState, "version" | "settings"> & {
+      version: 1 | 2 | 3;
+      settings?: Partial<Settings> & { themes?: unknown; difficulties?: unknown };
       lastActivityAt?: number;
       revision?: number;
     };
-    state.version = 2;
+    const legacyDifficulties = Array.isArray(persisted.settings?.difficulties)
+      ? persisted.settings.difficulties
+      : [];
+    const difficulty = isDifficulty(persisted.settings?.difficulty)
+      ? persisted.settings.difficulty
+      : legacyDifficulties.includes("moyen")
+        ? "moyen"
+        : legacyDifficulties.find(isDifficulty) ?? DEFAULT_SETTINGS.difficulty;
+    const state = persisted as unknown as RoomState;
+    state.version = 3;
     state.settings = {
-      durationSeconds: state.settings?.durationSeconds ?? DEFAULT_SETTINGS.durationSeconds,
-      rounds: state.settings?.rounds ?? DEFAULT_SETTINGS.rounds,
-      difficulties: state.settings?.difficulties ?? structuredClone(DEFAULT_SETTINGS.difficulties),
+      durationSeconds: persisted.settings?.durationSeconds ?? DEFAULT_SETTINGS.durationSeconds,
+      rounds: persisted.settings?.rounds ?? DEFAULT_SETTINGS.rounds,
+      difficulty,
     };
     state.lastActivityAt = Number.isFinite(state.lastActivityAt) ? state.lastActivityAt : state.updatedAt ?? state.createdAt;
     state.revision = Number.isInteger(state.revision) && state.revision >= 0 ? state.revision : 0;

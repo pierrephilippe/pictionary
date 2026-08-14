@@ -33,7 +33,7 @@ export interface Player {
 export interface Settings {
   durationSeconds: (typeof DURATIONS)[number];
   rounds: (typeof ROUND_COUNTS)[number];
-  difficulties: Difficulty[];
+  difficulty: Difficulty;
 }
 
 export interface Word {
@@ -80,7 +80,7 @@ export interface ConnectionTicket {
 }
 
 export interface RoomState {
-  version: 2;
+  version: 3;
   code: string;
   createdAt: number;
   updatedAt: number;
@@ -138,5 +138,5 @@ export interface RoomSnapshot {
 export const DEFAULT_SETTINGS: Settings = {
   durationSeconds: 60,
   rounds: 10,
-  difficulties: [...DIFFICULTIES],
+  difficulty: "moyen",
 };

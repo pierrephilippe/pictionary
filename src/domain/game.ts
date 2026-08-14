@@ -1,6 +1,7 @@
 import { CATALOGUE } from "./catalogue";
 import {
   DEFAULT_SETTINGS,
+  DIFFICULTIES,
   type CurrentTurn,
   type DevicePresence,
   type GamePhase,
@@ -35,7 +36,7 @@ export interface AppendStrokeResult {
 }
 
 export const createRoomState = (code: string, controller: Session, now: number): RoomState => ({
-  version: 2,
+  version: 3,
   code,
   createdAt: now,
   updatedAt: now,
@@ -86,9 +87,9 @@ const chooseRandom = <T>(items: T[], random: () => number): T => {
 
 const chooseWord = (state: RoomState, random: () => number): Word => {
   const matching = CATALOGUE.filter(
-    (word) => state.settings.difficulties.includes(word.difficulty),
+    (word) => state.settings.difficulty === word.difficulty,
   );
-  if (matching.length === 0) throw new GameRuleError("Choisissez au moins une difficulté.");
+  if (matching.length === 0) throw new GameRuleError("Aucun mot disponible pour cette difficulté.");
   let candidates = matching.filter((word) => !state.usedWordIds.includes(word.id));
   if (candidates.length === 0) {
     state.usedWordIds = [];
@@ -159,7 +160,7 @@ export function removePlayer(state: RoomState, playerId: string, now: number): v
 export function startGame(state: RoomState, settings: Settings, now: number, random: () => number): void {
   if (state.phase !== "lobby") throw new GameRuleError("La partie est déjà lancée.");
   if (state.players.length < 1) throw new GameRuleError("Ajoutez au moins un joueur avant de lancer la partie.");
-  if (settings.difficulties.length === 0) throw new GameRuleError("Choisissez au moins une difficulté.");
+  if (!DIFFICULTIES.includes(settings.difficulty)) throw new GameRuleError("Choisissez une difficulté valide.");
   state.settings = structuredClone(settings);
   const drawer = chooseRandom(state.players, random);
   state.current = createTurn(state, 1, drawer.id, now);

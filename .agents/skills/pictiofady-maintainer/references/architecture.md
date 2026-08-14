@@ -19,7 +19,7 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 | --- | --- |
 | Types et phases métier | `src/domain/types.ts` |
 | Transitions et autorisations métier | `src/domain/game.ts` |
-| Catalogue interne de mots | `src/domain/catalogue.ts` |
+| Dictionnaire éditorial et catalogue généré | `src/domain/data/dictionary.fr.json`, `src/domain/catalogue.ts` |
 | Commandes et messages Zod | `src/shared/protocol.ts` |
 | Routes, en-têtes, corps et rate limits HTTP | `src/server/worker.ts` |
 | SQLite, sessions, tickets, WebSockets, alarmes | `src/server/room.ts` |
@@ -32,10 +32,11 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 ## Invariants métier
 
 - Phases : `lobby -> awaiting_ready -> armed -> drawing -> resolving -> revealing -> finished`. `resolving` fige la toile après le chrono et attend une décision explicite du dessinateur; les alarmes font progresser ou expirer la salle côté serveur.
-- Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }`. Le Durable Object exige alors un projecteur WebSocket actif et un autre terminal actif en mode dessin; une session HTTP simplement créée ne compte pas.
+- Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }` avec une seule `difficulty`. Le Durable Object exige alors un projecteur WebSocket actif et un autre terminal actif en mode dessin; une session HTTP simplement créée ne compte pas. Les anciens réglages `difficulties[]` sont normalisés vers un niveau unique lors de la restauration persistée.
 - Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, puis peut dessiner ou résoudre immédiatement la manche.
 - Le serveur recalcule toutes les capacités (`canDraw`, `canTakeDrawingTurn`, `canSelectWinner`) et refuse toute commande hors rôle, session, tour ou phase.
 - Une seule résolution est admise. Le joueur désigné par le dessinateur devient toujours le dessinateur suivant; « Aucun gagnant » choisit aléatoirement un autre joueur. Les scores et le prochain dessinateur sont calculés par le serveur, jamais par le client.
+- Le catalogue de mots est interne et additif : `prompts` regroupe directement chaque univers par difficulté. Les variantes `difficile` du même univers qualifient ses mots faciles et moyens. La génération conserve un ordre stable pour que les cartes existantes gardent leur identifiant, et les tests protègent la diversité minimale.
 - Après `finished`, seul le contrôleur peut envoyer `return_to_lobby`. La transition conserve joueurs, réglages et séquence de tours, mais remet scores, manche, gagnants et mots utilisés à zéro avant une nouvelle préparation.
 - Seul le contrôleur peut envoyer `delete_room`. Cette destruction efface l'état durable et l'alarme, ferme chaque WebSocket avec la raison `Room deleted`, puis interdit toute nouvelle invitation, tout ticket et toute reprise de la salle.
 

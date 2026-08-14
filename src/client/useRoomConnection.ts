@@ -15,6 +15,7 @@ export function useRoomConnection(session: StoredSession | null) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [sessionUnavailable, setSessionUnavailable] = useState(false);
+  const [roomDeleted, setRoomDeleted] = useState(false);
   const retryRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
@@ -25,6 +26,7 @@ export function useRoomConnection(session: StoredSession | null) {
     setConnectionError(null);
     setConnected(false);
     setSessionUnavailable(false);
+    setRoomDeleted(false);
     if (!session) return undefined;
 
     let disposed = false;
@@ -127,6 +129,7 @@ export function useRoomConnection(session: StoredSession | null) {
           if (event.code === 4004 && event.reason === "Room deleted") {
             fatal = true;
             setSessionUnavailable(true);
+            setRoomDeleted(true);
             setConnectionError("Cette partie a été supprimée par son organisateur.");
             return;
           }
@@ -203,5 +206,5 @@ export function useRoomConnection(session: StoredSession | null) {
   }, []);
 
   const retry = useCallback(() => retryRef.current(), []);
-  return { snapshot, connectionError, connected, retry, send, sessionUnavailable };
+  return { snapshot, connectionError, connected, retry, send, sessionUnavailable, roomDeleted };
 }

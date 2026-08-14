@@ -48,6 +48,12 @@ const STROKE_CHUNK_SIZE = 96;
 const CLEAR_CONFIRMATION_MS = 4_000;
 type SendCommand = (command: ClientCommand) => boolean;
 
+const DIFFICULTY_PRESENTATION = {
+  facile: { emoji: "🙂", label: "Facile", hint: "Détente" },
+  moyen: { emoji: "🤔", label: "Moyen", hint: "Équilibré" },
+  difficile: { emoji: "🔥", label: "Difficile", hint: "Défi" },
+} satisfies Record<Difficulty, { emoji: string; label: string; hint: string }>;
+
 const haptic = (pattern: number | number[]): void => {
   try {
     navigator.vibrate?.(pattern);
@@ -591,18 +597,39 @@ function WinnerSelection({ snapshot, connected, send }: { snapshot: RoomSnapshot
   return <section className="resolution" aria-labelledby="winner-selection-title"><div><p className="eyebrow">Décision du dessinateur</p><h2 id="winner-selection-title">Qui a gagné la manche ?</h2><p>{snapshot.phase === "resolving" ? "Le temps est écoulé. Désignez le gagnant pour continuer." : "Le gagnant devient le prochain dessinateur."}</p></div>{candidates.length > 0 ? <div className="winner-grid" role="group" aria-label="Joueur gagnant">{candidates.map((player) => <button key={player.id} type="button" disabled={!connected || submitting} className={`winner-button${selectedWinnerId === player.id ? " is-selected" : ""}`} aria-pressed={selectedWinnerId === player.id} onClick={() => { setSelectedWinnerId(player.id); haptic(8); }}><span className="winner-button__name">{player.name}</span><span className="winner-button__point">Prochain dessinateur</span></button>)}</div> : <p className="resolution-empty">Vous êtes seul·e dans cette partie : choisissez « Aucun gagnant » pour continuer.</p>}<div className="resolution-actions"><button type="button" className="button button--primary" disabled={!connected || !selectedWinner || submitting} onClick={chooseWinner}>{submitting ? "Validation…" : selectedWinner ? `Choisir ${selectedWinner.name}` : "Choisissez le gagnant"}</button><button type="button" className="no-winner-button" disabled={!connected || submitting} onClick={chooseNobody}>{submitting ? "Validation…" : "Aucun gagnant — tirage au sort"}</button></div></section>;
 }
 
-function ToggleList<T extends string>({
-  values, selected, toggle, label,
-}: {
-  values: readonly T[];
-  selected: T[];
-  toggle: (value: T) => void;
-  label: (value: T) => string;
-}) {
-  return <div className="toggle-list" role="group" aria-label="Difficultés des mots, plusieurs choix possibles">{values.map((value) => <button key={value} type="button" className={selected.includes(value) ? "selected" : ""} aria-pressed={selected.includes(value)} onClick={() => toggle(value)}>{label(value)}</button>)}</div>;
+function DifficultySelector({ value, onChange }: { value: Difficulty; onChange: (value: Difficulty) => void }) {
+  const selectedIndex = DIFFICULTIES.indexOf(value);
+  return (
+    <fieldset className="difficulty-selector">
+      <legend>Difficulté des mots</legend>
+      <div className="difficulty-selector__track" style={{ "--difficulty-index": selectedIndex } as CSSProperties}>
+        <span className="difficulty-selector__thumb" aria-hidden="true" />
+        {DIFFICULTIES.map((difficulty) => {
+          const presentation = DIFFICULTY_PRESENTATION[difficulty];
+          return (
+            <label key={difficulty} className="difficulty-option">
+              <input
+                type="radio"
+                name="difficulty"
+                value={difficulty}
+                checked={value === difficulty}
+                onChange={() => {
+                  onChange(difficulty);
+                  haptic(8);
+                }}
+              />
+              <span className="difficulty-option__emoji" aria-hidden="true">{presentation.emoji}</span>
+              <strong>{presentation.label}</strong>
+              <small>{presentation.hint}</small>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
 }
 
-function OverlayDialog({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+function OverlayDialog({ label, onClose, children, className = "" }: { label: string; onClose: () => void; children: React.ReactNode; className?: string }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -630,7 +657,7 @@ function OverlayDialog({ label, onClose, children }: { label: string; onClose: (
       first.focus();
     }
   };
-  return <section className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className="app-modal" role="dialog" aria-modal="true" aria-label={label} onKeyDown={keepFocusInside}><header className="app-modal__header"><h2>{label}</h2><button ref={closeRef} type="button" aria-label={`Fermer ${label}`} onClick={onClose}>×</button></header>{children}</div></section>;
+  return <section className="app-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className={`app-modal ${className}`.trim()} role="dialog" aria-modal="true" aria-label={label} onKeyDown={keepFocusInside}><header className="app-modal__header"><h2>{label}</h2><button ref={closeRef} type="button" aria-label={`Fermer ${label}`} onClick={onClose}>×</button></header>{children}</div></section>;
 }
 
 function DeleteRoomDialog({ connected, onDelete, onClose }: { connected: boolean; onDelete: () => boolean; onClose: () => void }) {
@@ -657,13 +684,7 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
   useEffect(() => () => {
     if (launchTimerRef.current !== null) window.clearTimeout(launchTimerRef.current);
   }, []);
-  const toggleDifficulty = (value: Difficulty): void => {
-    setSettings((previous) => {
-      const list = previous.difficulties;
-      const next = list.includes(value) ? list.filter((candidate) => candidate !== value) : [...list, value];
-      return { ...previous, difficulties: next };
-    });
-  };
+  const selectDifficulty = (difficulty: Difficulty): void => setSettings((previous) => ({ ...previous, difficulty }));
   const joinUrl = `${window.location.origin}/?join=${snapshot.code}`;
   const launch = (): void => {
     if (!connected || launchPendingRef.current) return;
@@ -683,7 +704,6 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
   const canLaunch = connected
     && !launching
     && snapshot.players.length >= 1
-    && settings.difficulties.length > 0
     && snapshot.devicePresence.hasRequiredDevices;
   const launchHelp = !connected
     ? "Reconnectez la salle pour démarrer."
@@ -691,9 +711,7 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
       ? "Ajoutez au moins un joueur."
       : !snapshot.devicePresence.hasRequiredDevices
         ? "Gardez ce projecteur connecté et rejoignez la salle avec un autre téléphone en mode dessin."
-        : settings.difficulties.length === 0
-          ? "Choisissez au moins une difficulté."
-          : "Tout est prêt pour démarrer.";
+        : "Tout est prêt pour démarrer.";
   return (
     <main className="role-screen controller-screen screen-split">
       <section className="screen-half screen-half--invite">
@@ -708,19 +726,19 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
           <footer className="invite-actions">
             <div className="device-readiness" aria-live="polite"><span className={snapshot.devicePresence.projectors > 0 ? "is-ready" : ""}>Projecteur {snapshot.devicePresence.projectors > 0 ? "prêt" : "absent"}</span><span className={snapshot.devicePresence.drawingPhones > 0 ? "is-ready" : ""}>Téléphone de dessin {snapshot.devicePresence.drawingPhones > 0 ? "prêt" : "absent"}</span></div>
             <p id="launch-help" className="launch-help">{launchHelp}</p>
-            <button className="button button--primary" aria-describedby="launch-help" disabled={!canLaunch} onClick={launch}>{launching ? "Lancement…" : "Démarrer la partie"}</button>
+            <button className={`button button--primary setup-start-button${canLaunch ? " is-ready" : ""}`} aria-describedby="launch-help" disabled={!canLaunch} onClick={launch}>{launching ? "Lancement…" : "Démarrer la partie"}</button>
           </footer>
         </div>
       </section>
       <section className="screen-half screen-half--setup">
         <div className="screen-half__content setup-overview">
-          <div><p className="eyebrow">Préparer la partie</p><h2>Joueurs et réglages</h2><p className="setup-summary">{settings.durationSeconds} s · {settings.rounds} manches · {settings.difficulties.length} niveau{settings.difficulties.length > 1 ? "x" : ""}</p></div>
+          <div><p className="eyebrow">Préparer la partie</p><h2>Joueurs et réglages</h2><p className="setup-summary">{settings.durationSeconds} s · {settings.rounds} manches · <span aria-hidden="true">{DIFFICULTY_PRESENTATION[settings.difficulty].emoji}</span> {DIFFICULTY_PRESENTATION[settings.difficulty].label}</p></div>
           <div className="setup-overview__actions"><button type="button" className={`setup-players-button${snapshot.players.length === 0 ? " is-needed" : ""}`} aria-label={`Gérer les joueurs : ${snapshot.players.length} sur 12${snapshot.players.length === 0 ? ". Ajoutez le premier joueur." : ""}`} onClick={() => setPlayersOpen(true)}><span>Joueurs</span><strong><b>{snapshot.players.length}</b><small>/12</small></strong>{snapshot.players.length === 0 ? <em>Ajouter un joueur</em> : null}</button><button type="button" onClick={() => setSettingsOpen(true)}>Réglages</button></div>
           <button type="button" className="room-delete-button" onClick={() => setDeleteOpen(true)}>Supprimer la partie</button>
         </div>
       </section>
-      {playersOpen ? <OverlayDialog label="Joueurs" onClose={() => setPlayersOpen(false)}><PlayerEditor snapshot={snapshot} connected={connected} send={send} playerName={playerName} onPlayerNameChange={setPlayerName} /></OverlayDialog> : null}
-      {settingsOpen ? <OverlayDialog label="Réglages de la partie" onClose={() => setSettingsOpen(false)}><div className="settings-editor"><div className="settings-fields"><label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label><label>Nombre de manches <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} manches</option>)}</select></label></div><h3>Difficultés des mots</h3><ToggleList values={DIFFICULTIES} selected={settings.difficulties} toggle={toggleDifficulty} label={(value) => value[0]!.toUpperCase() + value.slice(1)} /></div></OverlayDialog> : null}
+      {playersOpen ? <OverlayDialog label="Joueurs" className="app-modal--players" onClose={() => setPlayersOpen(false)}><PlayerEditor snapshot={snapshot} connected={connected} send={send} playerName={playerName} onPlayerNameChange={setPlayerName} /></OverlayDialog> : null}
+      {settingsOpen ? <OverlayDialog label="Réglages de la partie" onClose={() => setSettingsOpen(false)}><div className="settings-editor"><div className="settings-fields"><label>Durée <select name="duration" value={settings.durationSeconds} onChange={(event) => setSettings({ ...settings, durationSeconds: Number(event.target.value) as Settings["durationSeconds"] })}>{DURATIONS.map((duration) => <option key={duration} value={duration}>{duration} secondes</option>)}</select></label><label>Nombre de manches <select name="rounds" value={settings.rounds} onChange={(event) => setSettings({ ...settings, rounds: Number(event.target.value) as Settings["rounds"] })}>{ROUND_COUNTS.map((rounds) => <option key={rounds} value={rounds}>{rounds} manches</option>)}</select></label></div><DifficultySelector value={settings.difficulty} onChange={selectDifficulty} /></div></OverlayDialog> : null}
       {deleteOpen ? <DeleteRoomDialog connected={connected} onDelete={() => send({ type: "delete_room" })} onClose={() => setDeleteOpen(false)} /> : null}
     </main>
   );
@@ -1132,9 +1150,12 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
 export function App() {
   const [session, setSession] = useState<StoredSession | null>(() => directJoinCode().length === ROOM_CODE_LENGTH ? null : loadSession());
   const pwa = usePwaLifecycle();
-  const { snapshot, connectionError, connected, retry, send, sessionUnavailable } = useRoomConnection(session);
+  const { snapshot, connectionError, connected, retry, send, sessionUnavailable, roomDeleted } = useRoomConnection(session);
   const adoptSession = (next: StoredSession): void => { saveSession(next); setSession(next); };
-  const leave = (): void => { saveSession(null); setSession(null); };
+  const leave = useCallback((): void => { saveSession(null); setSession(null); }, []);
+  useEffect(() => {
+    if (session?.role === "controller" && roomDeleted) leave();
+  }, [leave, roomDeleted, session?.role]);
   if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} /></>;
   if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading screen-split"><section className="screen-half screen-half--primary"><div className="screen-half__content"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1></div></section><section className="screen-half screen-half--secondary"><div className="screen-half__content"><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></div></section></main></>;
   const reconnectAction = sessionUnavailable ? leave : retry;

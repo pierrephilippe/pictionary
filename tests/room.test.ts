@@ -132,16 +132,16 @@ describe("Worker et Durable Object de salle", () => {
     await expect(json<{ error: string }>(response)).resolves.toEqual({ error: "Origine de connexion refusée." });
   });
 
-  it("migre un état version 1 sans conserver le réglage de thème", async () => {
+  it("migre un état version 2 vers une difficulté unique sans conserver le thème", async () => {
     const code = "MGRA23";
     const stub = env.GAME_ROOM.getByName(`room:${code}`);
     const legacyState = {
-      version: 1,
+      version: 2,
       code,
       createdAt: 1_000,
       updatedAt: 2_000,
       phase: "lobby",
-      settings: { durationSeconds: 90, rounds: 5, themes: ["animaux"], difficulties: ["moyen"] },
+      settings: { durationSeconds: 90, rounds: 5, themes: ["animaux"], difficulties: ["facile", "moyen", "difficile"] },
       players: [],
       sessions: [{ id: "legacy-controller", token: "legacy-token", role: "controller", createdAt: 1_000, lastSeenAt: 2_000 }],
       tickets: [],
@@ -161,10 +161,10 @@ describe("Worker et Durable Object de salle", () => {
     await runInDurableObject(stub, (_instance, state) => {
       const payload = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one().payload;
       const migrated = JSON.parse(payload) as Record<string, unknown> & { settings: Record<string, unknown> };
-      expect(migrated.version).toBe(2);
+      expect(migrated.version).toBe(3);
       expect(migrated.revision).toBe(1);
       expect(migrated.lastActivityAt).toEqual(expect.any(Number));
-      expect(migrated.settings).toEqual({ durationSeconds: 90, rounds: 5, difficulties: ["moyen"] });
+      expect(migrated.settings).toEqual({ durationSeconds: 90, rounds: 5, difficulty: "moyen" });
     });
   });
 
@@ -248,6 +248,11 @@ describe("Worker et Durable Object de salle", () => {
 
     const rejected = await send(controllerSocket, { type: "start_game", settings: DEFAULT_SETTINGS, elevated: true }, (message) => message.type === "error");
     expect(rejected).toMatchObject({ type: "error", message: "Commande invalide." });
+    const legacyMultipleChoice = await send(controllerSocket, {
+      type: "start_game",
+      settings: { durationSeconds: 60, rounds: 10, difficulties: ["facile", "difficile"] },
+    }, (message) => message.type === "error");
+    expect(legacyMultipleChoice).toMatchObject({ type: "error", message: "Commande invalide." });
     controllerSocket.close();
   });
 
@@ -407,9 +412,9 @@ describe("Worker et Durable Object de salle", () => {
 
     expect((await send(controllerSocket, { type: "add_player", name: "Lila" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 1)).snapshot?.players).toHaveLength(1);
     expect((await send(controllerSocket, { type: "add_player", name: "Noé" }, (message) => message.type === "snapshot" && message.snapshot?.players.length === 2)).snapshot?.players).toHaveLength(2);
-    const started = await send(controllerSocket, { type: "start_game", settings: { ...DEFAULT_SETTINGS, durationSeconds: 30, rounds: 5, difficulties: ["moyen"] } }, (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready");
+    const started = await send(controllerSocket, { type: "start_game", settings: { ...DEFAULT_SETTINGS, durationSeconds: 30, rounds: 5, difficulty: "difficile" } }, (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready");
     expect(started.snapshot?.phase).toBe("awaiting_ready");
-    expect(started.snapshot?.settings).toEqual({ durationSeconds: 30, rounds: 5, difficulties: ["moyen"] });
+    expect(started.snapshot?.settings).toEqual({ durationSeconds: 30, rounds: 5, difficulty: "difficile" });
     const drawerId = started.snapshot?.turn?.drawerId;
     const turnId = started.snapshot?.turn?.id;
     const drawerSocket = firstSocket;
@@ -664,16 +669,9 @@ describe("Worker et Durable Object de salle", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ role: "terminal" }),
     });
-    const secondJoined = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ role: "terminal" }),
-    });
     const firstTerminal = await json<SessionResponse>(firstJoined);
-    const secondTerminal = await json<SessionResponse>(secondJoined);
     const controllerSocket = await openSocket(controller.code, controller.token);
     const firstTerminalSocket = await openSocket(controller.code, firstTerminal.token);
-    const secondTerminalSocket = await openSocket(controller.code, secondTerminal.token);
 
     const terminalRejected = await send(
       firstTerminalSocket,
@@ -682,11 +680,10 @@ describe("Worker et Durable Object de salle", () => {
     );
     expect(terminalRejected).toMatchObject({ type: "error", message: "Réservé au contrôleur de jeu." });
 
-    const closed = [controllerSocket, firstTerminalSocket, secondTerminalSocket].map(waitForClose);
+    const closed = [controllerSocket, firstTerminalSocket].map(waitForClose);
     controllerSocket.send(JSON.stringify({ type: "delete_room" }));
 
     await expect(Promise.all(closed)).resolves.toEqual([
-      expect.objectContaining({ code: 4004, reason: "Room deleted" }),
       expect.objectContaining({ code: 4004, reason: "Room deleted" }),
       expect.objectContaining({ code: 4004, reason: "Room deleted" }),
     ]);

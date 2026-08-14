@@ -23,7 +23,7 @@ import {
   undo,
 } from "../src/domain/game";
 import { CATALOGUE, CATALOGUE_SIZE } from "../src/domain/catalogue";
-import { DEFAULT_SETTINGS, type Player, type RoomState, type Session } from "../src/domain/types";
+import { DEFAULT_SETTINGS, type Difficulty, type Player, type RoomState, type Session } from "../src/domain/types";
 
 const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0, lastSeenAt: 0 };
 const terminal: Session = { id: "terminal", token: "terminal-token", role: "terminal", createdAt: 0, lastSeenAt: 0 };
@@ -41,13 +41,13 @@ function startedRoom() {
 }
 
 describe("moteur de jeu", () => {
-  it("propose plus de trois mille cartes, dans chaque thème et difficulté", () => {
-    expect(CATALOGUE_SIZE).toBeGreaterThanOrEqual(3_000);
+  it("propose un catalogue riche et équilibré dans chaque thème et difficulté", () => {
+    expect(CATALOGUE_SIZE).toBeGreaterThanOrEqual(9_750);
     expect(new Set(CATALOGUE.map((word) => word.id)).size).toBe(CATALOGUE_SIZE);
     for (const theme of ["animaux", "objets", "alimentation", "lieux", "metiers"] as const) {
-      for (const difficulty of ["facile", "moyen", "difficile"] as const) {
-        expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === difficulty)).not.toHaveLength(0);
-      }
+      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "facile")).toHaveLength(75);
+      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "moyen")).toHaveLength(75);
+      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "difficile")).toHaveLength(1_800);
     }
   });
 
@@ -57,8 +57,8 @@ describe("moteur de jeu", () => {
     addPlayer(state, player("player-2", "Noé"), 1);
     removePlayer(state, "player-2", 2);
 
-    const difficultSettings = { ...DEFAULT_SETTINGS, durationSeconds: 30 as const, rounds: 5 as const, difficulties: ["difficile"] as const };
-    startGame(state, { ...difficultSettings, difficulties: [...difficultSettings.difficulties] }, 3, deterministic);
+    const difficultSettings = { ...DEFAULT_SETTINGS, durationSeconds: 30 as const, rounds: 5 as const, difficulty: "difficile" as const };
+    startGame(state, difficultSettings, 3, deterministic);
 
     expect(state.settings).toEqual(difficultSettings);
     expect(state.players.map((candidate) => candidate.name)).toEqual(["Lila"]);
@@ -72,7 +72,7 @@ describe("moteur de jeu", () => {
     const state = createRoomState("INVALID", controller, 0);
     addPlayer(state, player("player-1", "Lila"), 1);
 
-    expect(() => startGame(state, { ...DEFAULT_SETTINGS, difficulties: [] }, 2, deterministic)).toThrow("Choisissez au moins une difficulté.");
+    expect(() => startGame(state, { ...DEFAULT_SETTINGS, difficulty: "inconnue" as Difficulty }, 2, deterministic)).toThrow("Choisissez une difficulté valide.");
     expect(state.phase).toBe("lobby");
     expect(state.current).toBeNull();
     expect(state.settings).toEqual(DEFAULT_SETTINGS);
