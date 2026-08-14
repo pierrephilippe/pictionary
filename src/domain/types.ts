@@ -2,6 +2,9 @@ export const THEMES = ["animaux", "objets", "alimentation", "lieux", "metiers"] 
 export const DIFFICULTIES = ["facile", "moyen", "difficile"] as const;
 export const DURATIONS = [30, 60, 90] as const;
 export const ROUND_COUNTS = [5, 10, 15] as const;
+export const MAX_STROKES_PER_TURN = 240;
+export const MAX_POINTS_PER_STROKE = 1_024;
+export const MAX_POINTS_PER_TURN = 8_000;
 
 export type Theme = (typeof THEMES)[number];
 export type Difficulty = (typeof DIFFICULTIES)[number];

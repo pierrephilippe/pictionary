@@ -1,4 +1,4 @@
-import type { Stroke, Tool } from "../../domain/types";
+import { MAX_POINTS_PER_STROKE, type Stroke, type Tool } from "../../domain/types";
 
 export interface PaintedStroke {
   id: string;
@@ -7,6 +7,19 @@ export interface PaintedStroke {
   pointCount: number;
   complete: boolean;
 }
+
+// The final point may be sent once more to close an already flushed stroke.
+// Keeping one slot free guarantees that this completion sample still fits the
+// authoritative per-stroke limit.
+export const shouldContinueStroke = (stroke: Stroke): boolean => stroke.points.length >= MAX_POINTS_PER_STROKE - 1;
+
+export const createStrokeContinuation = (stroke: Stroke, id: string): Stroke => ({
+  id,
+  tool: stroke.tool,
+  width: stroke.width,
+  points: [stroke.points.at(-1)!],
+  complete: false,
+});
 
 export function drawStroke(
   context: CanvasRenderingContext2D,

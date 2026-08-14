@@ -22,7 +22,8 @@ import {
   takeDrawingTurn,
   undo,
 } from "../src/domain/game";
-import { CATALOGUE, CATALOGUE_SIZE } from "../src/domain/catalogue";
+import { CATALOGUE, CATALOGUE_SIZE, wordIdFor } from "../src/domain/catalogue";
+import dictionary from "../src/domain/data/dictionary.fr.json";
 import { DEFAULT_SETTINGS, type Difficulty, type Player, type RoomState, type Session } from "../src/domain/types";
 
 const controller: Session = { id: "controller", token: "controller-token", role: "controller", createdAt: 0, lastSeenAt: 0 };
@@ -42,12 +43,26 @@ function startedRoom() {
 
 describe("moteur de jeu", () => {
   it("propose un catalogue riche et équilibré dans chaque thème et difficulté", () => {
-    expect(CATALOGUE_SIZE).toBeGreaterThanOrEqual(9_750);
+    expect(CATALOGUE_SIZE).toBeGreaterThanOrEqual(1_125);
     expect(new Set(CATALOGUE.map((word) => word.id)).size).toBe(CATALOGUE_SIZE);
+    expect(wordIdFor("chat", "animaux", "facile")).toBe("word-animaux-facile-b2d9f03309ab4a92");
+    expect(wordIdFor("chat", "animaux", "facile")).not.toBe(wordIdFor("chat", "animaux", "moyen"));
+    const labelsByDifficulty = new Map<Difficulty, string[]>();
     for (const theme of ["animaux", "objets", "alimentation", "lieux", "metiers"] as const) {
-      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "facile")).toHaveLength(75);
-      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "moyen")).toHaveLength(75);
-      expect(CATALOGUE.filter((word) => word.theme === theme && word.difficulty === "difficile")).toHaveLength(1_800);
+      const themeLabels: string[] = [];
+      for (const difficulty of ["facile", "moyen", "difficile"] as const) {
+        const labels = CATALOGUE
+          .filter((word) => word.theme === theme && word.difficulty === difficulty)
+          .map((word) => word.label);
+        expect(labels).toEqual(dictionary.prompts[theme][difficulty]);
+        expect(labels.length).toBeGreaterThanOrEqual(75);
+        labelsByDifficulty.set(difficulty, [...(labelsByDifficulty.get(difficulty) ?? []), ...labels]);
+        themeLabels.push(...labels);
+      }
+      expect(new Set(themeLabels.map((label) => label.toLocaleLowerCase("fr"))).size).toBe(themeLabels.length);
+    }
+    for (const labels of labelsByDifficulty.values()) {
+      expect(new Set(labels.map((label) => label.toLocaleLowerCase("fr"))).size).toBe(labels.length);
     }
   });
 

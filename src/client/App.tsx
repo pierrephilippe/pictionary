@@ -23,6 +23,7 @@ import {
 } from "./session";
 import { useRoomConnection } from "./useRoomConnection";
 import { DrawingCanvas } from "./drawing/DrawingCanvas";
+import { createStrokeContinuation, shouldContinueStroke } from "./drawing/model";
 import { VEE_FACE_ROTATIONS } from "./projection";
 
 const RoomQrCode = lazy(async () => {
@@ -208,19 +209,23 @@ function GameStatus({ snapshot }: { snapshot: RoomSnapshot }) {
   return <section key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className={`game-status game-status--${snapshot.phase}`} aria-live="polite"><div><p className="eyebrow">{details.eyebrow}</p><strong>{details.title}</strong></div>{countdown ? <PhaseCountdown deadlineAt={countdown} serverNow={snapshot.serverNow} label={countdownLabel} /> : <RoundProgress snapshot={snapshot} compact />}</section>;
 }
 
-function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
+function DrawingBoard({ snapshot, connected, connectionMessage, commandErrorSequence, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; commandErrorSequence: number; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
   const [tool, setTool] = useState<Tool>("pen");
   const [width, setWidth] = useState(8);
-  const [draft, setDraft] = useState<Stroke | null>(null);
+  const [drafts, setDrafts] = useState<Stroke[]>([]);
   const [clearConfirmation, setClearConfirmation] = useState(false);
   const [winnerOpen, setWinnerOpen] = useState(false);
+  const [drawingError, setDrawingError] = useState<string | null>(null);
   const activeRef = useRef<Stroke | null>(null);
+  const gestureSegmentsRef = useRef<Stroke[]>([]);
   const activeCanvasRevisionRef = useRef(0);
   const pendingRef = useRef<Point[]>([]);
   const startedRef = useRef(false);
   const lastFlushRef = useRef(0);
   const draftFrameRef = useRef<number | null>(null);
   const clearTimerRef = useRef<number | null>(null);
+  const drawingErrorTimerRef = useRef<number | null>(null);
+  const handledCommandErrorRef = useRef(commandErrorSequence);
   const pointerPreviewRef = useRef<HTMLDivElement>(null);
   const winnerTriggerRef = useRef<HTMLButtonElement>(null);
   const winnerCloseRef = useRef<HTMLButtonElement>(null);
@@ -231,10 +236,10 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     pointerPreviewRef.current?.classList.remove("is-visible");
   };
 
-  const showPointerPreview = (target: HTMLCanvasElement, clientX: number, clientY: number): void => {
+  const showPointerPreview = (target: HTMLCanvasElement, clientX: number, clientY: number, knownCanvasBounds?: DOMRect): void => {
     const preview = pointerPreviewRef.current;
     if (!preview) return;
-    const canvasBounds = target.getBoundingClientRect();
+    const canvasBounds = knownCanvasBounds ?? target.getBoundingClientRect();
     const shellBounds = preview.parentElement?.getBoundingClientRect() ?? canvasBounds;
     const x = Math.min(canvasBounds.right, Math.max(canvasBounds.left, clientX));
     const y = Math.min(canvasBounds.bottom, Math.max(canvasBounds.top, clientY));
@@ -249,44 +254,79 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     setClearConfirmation(false);
   };
 
+  const clearDrawingError = (): void => {
+    if (drawingErrorTimerRef.current) window.clearTimeout(drawingErrorTimerRef.current);
+    drawingErrorTimerRef.current = null;
+    setDrawingError(null);
+  };
+
   useEffect(() => () => {
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     if (clearTimerRef.current) window.clearTimeout(clearTimerRef.current);
+    if (drawingErrorTimerRef.current) window.clearTimeout(drawingErrorTimerRef.current);
   }, []);
   useEffect(() => {
     activeRef.current = null;
+    gestureSegmentsRef.current = [];
     pendingRef.current = [];
     startedRef.current = false;
-    setDraft(null);
+    setDrafts([]);
     setWinnerOpen(false);
     hidePointerPreview();
     cancelClearConfirmation();
+    clearDrawingError();
   }, [turn?.canvasRevision, turn?.id]);
   useEffect(() => {
     if (connected) return;
     activeRef.current = null;
+    gestureSegmentsRef.current = [];
     pendingRef.current = [];
     startedRef.current = false;
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     draftFrameRef.current = null;
-    setDraft(null);
+    setDrafts([]);
     setWinnerOpen(false);
     hidePointerPreview();
     cancelClearConfirmation();
+    clearDrawingError();
   }, [connected]);
+  useEffect(() => {
+    if (commandErrorSequence === 0) {
+      handledCommandErrorRef.current = 0;
+      return;
+    }
+    if (commandErrorSequence === handledCommandErrorRef.current) return;
+    handledCommandErrorRef.current = commandErrorSequence;
+    activeRef.current = null;
+    gestureSegmentsRef.current = [];
+    pendingRef.current = [];
+    startedRef.current = false;
+    if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
+    draftFrameRef.current = null;
+    setDrafts([]);
+    hidePointerPreview();
+    setDrawingError(connectionMessage ?? "Le serveur a refusé ce trait. Reprenez votre dessin.");
+    if (drawingErrorTimerRef.current) window.clearTimeout(drawingErrorTimerRef.current);
+    drawingErrorTimerRef.current = window.setTimeout(() => {
+      drawingErrorTimerRef.current = null;
+      setDrawingError(null);
+    }, 3_500);
+  }, [commandErrorSequence]);
   useEffect(() => {
     if (snapshot.phase !== "resolving") return;
     // The authoritative timer has stopped the manche. Drop any local gesture
     // still held by the pointer so it cannot remain painted over the frozen
     // canvas while the drawer chooses the winner.
     activeRef.current = null;
+    gestureSegmentsRef.current = [];
     pendingRef.current = [];
     startedRef.current = false;
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     draftFrameRef.current = null;
-    setDraft(null);
+    setDrafts([]);
     hidePointerPreview();
     cancelClearConfirmation();
+    clearDrawingError();
   }, [snapshot.phase]);
   useEffect(() => {
     if (!winnerOpen) return;
@@ -300,6 +340,15 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
   useEffect(() => {
     if (connected && snapshot.phase === "resolving" && snapshot.canSelectWinner) setWinnerOpen(true);
   }, [connected, snapshot.canSelectWinner, snapshot.phase, turn?.id]);
+  useEffect(() => {
+    if (!turn) return;
+    const committedPoints = new Map(turn.strokes.map((stroke) => [stroke.id, stroke.points.length]));
+    const active = activeRef.current;
+    const remaining = gestureSegmentsRef.current.filter((stroke) => stroke === active || (committedPoints.get(stroke.id) ?? 0) < stroke.points.length);
+    if (remaining.length === gestureSegmentsRef.current.length) return;
+    gestureSegmentsRef.current = remaining;
+    setDrafts(remaining.map((stroke) => ({ ...stroke, points: [...stroke.points] })));
+  }, [turn, turn?.strokes]);
 
   const closeWinner = (): void => {
     setWinnerOpen(false);
@@ -330,13 +379,11 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     if (draftFrameRef.current !== null) return;
     draftFrameRef.current = window.requestAnimationFrame(() => {
       draftFrameRef.current = null;
-      const active = activeRef.current;
-      setDraft(active ? { ...active, points: [...active.points] } : null);
+      setDrafts(gestureSegmentsRef.current.map((stroke) => ({ ...stroke, points: [...stroke.points] })));
     });
   };
 
-  const pointFromCoordinates = (target: HTMLCanvasElement, clientX: number, clientY: number): Point => {
-    const rect = target.getBoundingClientRect();
+  const pointFromCoordinates = (rect: DOMRect, clientX: number, clientY: number): Point => {
     return {
       x: Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)),
       y: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
@@ -368,24 +415,26 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
 
   const down = (event: React.PointerEvent<HTMLCanvasElement>): void => {
     if (!connected || !snapshot.canDraw || !turn) return;
-    showPointerPreview(event.currentTarget, event.clientX, event.clientY);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    showPointerPreview(event.currentTarget, event.clientX, event.clientY, bounds);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
       // Some embedded browsers expose Pointer Events without pointer capture.
     }
-    const point = pointFromCoordinates(event.currentTarget, event.clientX, event.clientY);
+    const point = pointFromCoordinates(bounds, event.clientX, event.clientY);
     const pressure = event.pointerType === "pen" && event.pressure > 0 ? event.pressure : 0.5;
     const pressureWidth = tool === "pen" && event.pointerType === "pen"
       ? Math.max(2, Math.min(28, Math.round(width * (0.55 + pressure * 0.9))))
       : width;
     const active: Stroke = { id: crypto.randomUUID(), tool, width: pressureWidth, points: [point], complete: false };
     activeRef.current = active;
+    gestureSegmentsRef.current.push(active);
     activeCanvasRevisionRef.current = turn.canvasRevision;
     pendingRef.current = [];
     startedRef.current = false;
     lastFlushRef.current = performance.now();
-    setDraft({ ...active, points: [...active.points] });
+    setDrafts(gestureSegmentsRef.current.map((stroke) => ({ ...stroke, points: [...stroke.points] })));
   };
 
   const move = (event: React.PointerEvent<HTMLCanvasElement>): void => {
@@ -393,27 +442,37 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
       hidePointerPreview();
       return;
     }
-    showPointerPreview(event.currentTarget, event.clientX, event.clientY);
-    const active = activeRef.current;
-    if (!active) return;
     const target = event.currentTarget;
+    const bounds = target.getBoundingClientRect();
+    showPointerPreview(target, event.clientX, event.clientY, bounds);
+    let active = activeRef.current;
+    if (!active) return;
     const samples = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
-    const addedPoints: Point[] = [];
     for (const sample of samples) {
-      const point = pointFromCoordinates(target, sample.clientX, sample.clientY);
-      if (appendPoint(active, point)) addedPoints.push(point);
-    }
-    const point = active.points.at(-1)!;
-    if (!startedRef.current) {
-      const first = active.points[0]!;
-        const hasMoved = Math.hypot(point.x - first.x, point.y - first.y) > 0.003;
-      if (hasMoved) {
-        startedRef.current = true;
-        pendingRef.current = [...active.points];
-        haptic(8);
+      const point = pointFromCoordinates(bounds, sample.clientX, sample.clientY);
+      if (startedRef.current && shouldContinueStroke(active)) {
+        const boundary = active.points.at(-1)!;
+        if (pendingRef.current.length === 0) pendingRef.current = [boundary];
+        if (!flush(true)) return;
+        active.complete = true;
+        const continuation = createStrokeContinuation(active, crypto.randomUUID());
+        gestureSegmentsRef.current.push(continuation);
+        activeRef.current = continuation;
+        active = continuation;
+        pendingRef.current = [boundary];
       }
-    } else if (addedPoints.length > 0) {
-      pendingRef.current.push(...addedPoints);
+      if (!appendPoint(active, point)) continue;
+      if (!startedRef.current) {
+        const first = active.points[0]!;
+        const latest = active.points.at(-1)!;
+        if (Math.hypot(latest.x - first.x, latest.y - first.y) > 0.003) {
+          startedRef.current = true;
+          pendingRef.current = [...active.points];
+          haptic(8);
+        }
+      } else {
+        pendingRef.current.push(point);
+      }
     }
     queueDraftPaint();
     if (startedRef.current && performance.now() - lastFlushRef.current >= 80) flush(false);
@@ -438,18 +497,23 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
     } else if (pendingRef.current.length === 0) {
       pendingRef.current = [active.points.at(-1)!];
     }
-    flush(true);
+    const completed = flush(true);
     try {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     } catch {
       // Releasing capture is optional when the browser never granted it.
     }
+    if (!completed && pendingRef.current.length > 0) {
+      hidePointerPreview();
+      return;
+    }
+    active.complete = true;
     activeRef.current = null;
     pendingRef.current = [];
     startedRef.current = false;
     if (draftFrameRef.current) window.cancelAnimationFrame(draftFrameRef.current);
     draftFrameRef.current = null;
-    setDraft(null);
+    setDrafts(gestureSegmentsRef.current.map((stroke) => ({ ...stroke, points: [...stroke.points] })));
     hidePointerPreview();
   };
 
@@ -493,7 +557,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
       <div className="drawing-canvas-shell">
         <DrawingCanvas
           strokes={turn?.strokes ?? []}
-          draft={draft}
+          drafts={drafts}
           inverse={false}
           className={`drawing-canvas${connected && snapshot.canDraw ? " is-drawable" : ""}`}
           ariaLabel={!connected ? "Zone de dessin en pause pendant la reconnexion" : snapshot.canDraw ? "Zone de dessin tactile" : "Dessin figé en attente de la décision du dessinateur"}
@@ -505,6 +569,7 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
           onPointerLeave={leaveCanvas}
         />
         <div ref={pointerPreviewRef} className={`drawing-pointer drawing-pointer--${tool}`} style={{ "--drawing-pointer-size": `${Math.round(14 + width * 0.75)}px` } as CSSProperties} aria-hidden="true" />
+        {drawingError ? <p className="drawing-command-error" role="alert">{drawingError}</p> : null}
         {!connected ? <div className="drawing-offline" role="status"><strong>Dessin en pause</strong><span>{connectionMessage ?? "Reconnexion en cours. Reprenez votre trait quand la connexion revient."}</span><button type="button" onClick={onReconnect}>{reconnectLabel}</button></div> : null}
       </div>
       {["armed", "drawing", "resolving"].includes(snapshot.phase) && snapshot.canSelectWinner && turn ? <div className="drawing-round-action"><button type="button" className="drawing-round-action__leave" onClick={onLeave}>Quitter</button><button ref={winnerTriggerRef} type="button" className="button button--primary" disabled={!connected} onClick={() => setWinnerOpen(true)}>{snapshot.phase === "resolving" ? "Désigner le gagnant" : "Interrompre la manche et désigner le gagnant"}</button></div> : null}
@@ -513,12 +578,12 @@ function DrawingBoard({ snapshot, connected, connectionMessage, reconnectLabel, 
   );
 }
 
-function TerminalScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
+function TerminalScreen({ snapshot, connected, connectionMessage, commandErrorSequence, reconnectLabel, onReconnect, send, onLeave }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; commandErrorSequence: number; reconnectLabel: string; onReconnect: () => void; send: SendCommand; onLeave: () => void }) {
   const isDrawer = snapshot.canDraw || snapshot.canSelectWinner;
   const turn = snapshot.turn;
   const [scoreOpen, setScoreOpen] = useState(false);
   if (isDrawer && ["armed", "drawing", "resolving"].includes(snapshot.phase)) {
-    return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} connected={connected} connectionMessage={connectionMessage} reconnectLabel={reconnectLabel} onReconnect={onReconnect} send={send} onLeave={onLeave} /></main>;
+    return <main className="drawing-terminal-screen"><DrawingBoard snapshot={snapshot} connected={connected} connectionMessage={connectionMessage} commandErrorSequence={commandErrorSequence} reconnectLabel={reconnectLabel} onReconnect={onReconnect} send={send} onLeave={onLeave} /></main>;
   }
   return (
     <main className="role-screen player-screen screen-split">
@@ -678,6 +743,7 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
   const [playersOpen, setPlayersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const [launching, setLaunching] = useState(false);
   const launchPendingRef = useRef(false);
   const launchTimerRef = useRef<number | null>(null);
@@ -686,6 +752,16 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
   }, []);
   const selectDifficulty = (difficulty: Difficulty): void => setSettings((previous) => ({ ...previous, difficulty }));
   const joinUrl = `${window.location.origin}/?join=${snapshot.code}`;
+  const copyJoinLink = async (): Promise<void> => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(joinUrl);
+      setCopyState("copied");
+      haptic(6);
+    } catch {
+      setCopyState("error");
+    }
+  };
   const launch = (): void => {
     if (!connected || launchPendingRef.current) return;
     launchPendingRef.current = true;
@@ -719,13 +795,13 @@ function ControllerScreen({ snapshot, connected, send }: { snapshot: RoomSnapsho
           <div className="invite-scroll">
             <RoomHeader snapshot={snapshot} label="Préparation" />
             <section className="join-card">
-              <div><p className="eyebrow">Inviter les téléphones</p><h1>{snapshot.code}</h1><a className="sr-only" href={joinUrl}>Lien direct pour rejoindre la salle {snapshot.code}</a></div>
+              <div><p className="eyebrow">Inviter les téléphones</p><h1>{snapshot.code}</h1><button type="button" className="link-button" aria-label="Copier le lien direct pour rejoindre la partie" onClick={() => void copyJoinLink()}>{copyState === "copied" ? "Lien copié" : "Copier le lien"}</button>{copyState === "error" ? <span className="copy-feedback copy-feedback--error" role="status">Copie indisponible : utilisez le QR code.</span> : null}</div>
               <figure className="join-qr" role="img" aria-label={`QR code pour rejoindre directement la salle ${snapshot.code}`}><Suspense fallback={<div className="qr-placeholder" aria-label="Génération du QR code" />}><RoomQrCode value={joinUrl} size={136} bgColor="#ffffff" fgColor="#101326" includeMargin /></Suspense><figcaption className="sr-only">Scannez pour rejoindre directement la salle {snapshot.code}.</figcaption></figure>
             </section>
           </div>
           <footer className="invite-actions">
             <div className="device-readiness" aria-live="polite"><span className={snapshot.devicePresence.projectors > 0 ? "is-ready" : ""}>Projecteur {snapshot.devicePresence.projectors > 0 ? "prêt" : "absent"}</span><span className={snapshot.devicePresence.drawingPhones > 0 ? "is-ready" : ""}>Téléphone de dessin {snapshot.devicePresence.drawingPhones > 0 ? "prêt" : "absent"}</span></div>
-            <p id="launch-help" className="launch-help">{launchHelp}</p>
+            <p id="launch-help" className="sr-only">{launchHelp}</p>
             <button className={`button button--primary setup-start-button${canLaunch ? " is-ready" : ""}`} aria-describedby="launch-help" disabled={!canLaunch} onClick={launch}>{launching ? "Lancement…" : "Démarrer la partie"}</button>
           </footer>
         </div>
@@ -1043,11 +1119,9 @@ function PwaUpdateNotice({ pwa }: { pwa: PwaControls }) {
 function JoinCodeInput({ value, disabled, onChange }: { value: string; disabled: boolean; onChange: (code: string) => void }) {
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focus = (index: number): void => {
-    window.requestAnimationFrame(() => {
-      const input = inputRefs.current[Math.max(0, Math.min(ROOM_CODE_LENGTH - 1, index))];
-      input?.focus();
-      input?.select();
-    });
+    const input = inputRefs.current[Math.max(0, Math.min(ROOM_CODE_LENGTH - 1, index))];
+    input?.focus();
+    input?.select();
   };
   const replaceFrom = (requestedIndex: number, rawValue: string): void => {
     const incoming = normaliseCode(rawValue);
@@ -1088,10 +1162,7 @@ function JoinCodeInput({ value, disabled, onChange }: { value: string; disabled:
         autoCorrect="off"
         spellCheck={false}
         aria-label={`Caractère ${index + 1} du code de salle`}
-        onFocus={(event) => {
-          if (index > value.length) focus(value.length);
-          else event.currentTarget.select();
-        }}
+        onFocus={(event) => event.currentTarget.select()}
         onChange={(event) => replaceFrom(index, event.currentTarget.value)}
         onKeyDown={(event) => {
           if (event.key === "Backspace" || event.key === "Delete") {
@@ -1115,6 +1186,7 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const attemptedCodeRef = useRef<string | null>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
   const create = async (): Promise<void> => {
     setBusy(true); setError(null);
     try {
@@ -1140,24 +1212,32 @@ function Home({ onSession }: { onSession: (session: StoredSession) => void }) {
     attemptedCodeRef.current = code;
     void join(code);
   }, [code, join]);
+  useEffect(() => {
+    if (!busy && error && code.length === ROOM_CODE_LENGTH) retryRef.current?.focus();
+  }, [busy, code.length, error]);
   const updateCode = (nextCode: string): void => {
     setError(null);
     setCode(nextCode);
   };
-  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} />{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <div className="join-error"><p className="error-message" role="alert">{error}</p>{code.length === ROOM_CODE_LENGTH ? <button type="button" disabled={busy} onClick={() => { attemptedCodeRef.current = null; void join(code); }}>Réessayer</button> : null}</div> : null}</section></main>;
+  return <main className="home"><section className="hero"><span className="brand">PICTIOFADY</span><p className="eyebrow">Nouvelle partie</p><h1>Créer une partie</h1><button className="button button--primary" disabled={busy} onClick={() => void create()}>Créer la salle <span aria-hidden="true">→</span></button></section><section className="join-panel"><p className="eyebrow">Code reçu</p><h2>Rejoindre une partie</h2><div className="join-code"><JoinCodeInput value={code} disabled={busy} onChange={updateCode} />{busy ? <p className="join-code__status" role="status">Connexion à la salle…</p> : null}</div>{error ? <div className="join-error"><p className="error-message" role="alert">{error}</p>{code.length === ROOM_CODE_LENGTH ? <button ref={retryRef} type="button" disabled={busy} onClick={() => { attemptedCodeRef.current = null; void join(code); }}>Réessayer</button> : null}</div> : null}</section></main>;
 }
 
 export function App() {
   const [session, setSession] = useState<StoredSession | null>(() => directJoinCode().length === ROOM_CODE_LENGTH ? null : loadSession());
   const pwa = usePwaLifecycle();
-  const { snapshot, connectionError, connected, retry, send, sessionUnavailable, roomDeleted } = useRoomConnection(session);
+  const { snapshot, connectionError, commandErrorSequence, connected, retry, send, sessionUnavailable, roomDeleted } = useRoomConnection(session);
   const adoptSession = (next: StoredSession): void => { saveSession(next); setSession(next); };
   const leave = useCallback((): void => { saveSession(null); setSession(null); }, []);
   useEffect(() => {
     if (session?.role === "controller" && roomDeleted) leave();
   }, [leave, roomDeleted, session?.role]);
   if (!session) return <><PwaUpdateNotice pwa={pwa} /><Home onSession={adoptSession} /></>;
-  if (!snapshot) return <><PwaUpdateNotice pwa={pwa} /><main className="loading screen-split"><section className="screen-half screen-half--primary"><div className="screen-half__content"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1></div></section><section className="screen-half screen-half--secondary"><div className="screen-half__content"><p>{connectionError ?? "Synchronisation de la partie…"}</p><button onClick={leave}>Quitter</button></div></section></main></>;
+  if (!snapshot) {
+    const controllerMustReconnect = session.role === "controller" && !sessionUnavailable;
+    const loadingAction = controllerMustReconnect ? retry : leave;
+    const loadingActionLabel = controllerMustReconnect ? "Réessayer" : session.role === "controller" ? "Retour à l’accueil" : "Quitter";
+    return <><PwaUpdateNotice pwa={pwa} /><main className="loading screen-split"><section className="screen-half screen-half--primary"><div className="screen-half__content"><span className="brand">PICTIOFADY</span><h1>Connexion à la salle {session.code}</h1></div></section><section className="screen-half screen-half--secondary"><div className="screen-half__content"><p>{connectionError ?? "Synchronisation de la partie…"}</p>{connectionError ? <button onClick={loadingAction}>{loadingActionLabel}</button> : null}</div></section></main></>;
+  }
   const reconnectAction = sessionUnavailable ? leave : retry;
   const reconnectLabel = sessionUnavailable ? "Retour à l’accueil" : "Réessayer";
   const drawingTerminalActive = session.role === "terminal" && snapshot.displayMode === "drawing" && (
@@ -1166,5 +1246,5 @@ export function App() {
   );
   const projectionDrawingActive = snapshot.phase === "drawing" && (session.role === "controller" || snapshot.displayMode === "projection");
   const hideGlobalConnection = drawingTerminalActive || projectionDrawingActive;
-  return <>{!["drawing", "resolving"].includes(snapshot.phase) ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onPrepareNewGame={connected ? () => send({ type: "return_to_lobby" }) : undefined} onDeleteRoom={connected ? () => send({ type: "delete_room" }) : undefined} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
+  return <>{!["drawing", "resolving"].includes(snapshot.phase) ? <PwaUpdateNotice pwa={pwa} /> : null}{!connected && !hideGlobalConnection ? <div className="connection-banner is-offline" role="status"><span>{connectionError ?? "Reconnexion…"}</span><button type="button" onClick={reconnectAction}>{reconnectLabel}</button></div> : null}{connected && connectionError && !projectionDrawingActive && !drawingTerminalActive ? <p className="connection-message" role="alert">{connectionError}</p> : null}{session.role === "controller" ? snapshot.phase === "lobby" ? <ControllerScreen snapshot={snapshot} connected={connected} send={send} /> : <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onPrepareNewGame={connected ? () => send({ type: "return_to_lobby" }) : undefined} onDeleteRoom={() => send({ type: "delete_room" })} /> : null}{session.role === "terminal" ? snapshot.displayMode === "projection" ? <ProjectionScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} onLeave={leave} onUseDrawingTerminal={connected ? () => { send({ type: "set_display_mode", displayMode: "drawing" }); } : undefined} /> : <TerminalScreen snapshot={snapshot} connected={connected} connectionMessage={connectionError} commandErrorSequence={commandErrorSequence} reconnectLabel={reconnectLabel} onReconnect={reconnectAction} send={send} onLeave={leave} /> : null}</>;
 }

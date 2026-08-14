@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { DIFFICULTIES, DURATIONS, ROUND_COUNTS } from "../domain/types";
+import { DIFFICULTIES, DURATIONS, MAX_POINTS_PER_STROKE, ROUND_COUNTS } from "../domain/types";
 
 const pointSchema = z.object({
   x: z.number().min(0).max(1),
@@ -20,7 +20,7 @@ const strokeChunkSchema = z.object({
 
 const persistedStrokeSchema = z.object({
   ...strokeFields,
-  points: z.array(pointSchema).min(1).max(1_024),
+  points: z.array(pointSchema).min(1).max(MAX_POINTS_PER_STROKE),
 }).strict();
 
 const settingsSchema = z.object({

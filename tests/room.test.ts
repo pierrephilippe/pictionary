@@ -1,7 +1,9 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { REVEAL_DURATION_MS } from "../src/domain/game";
+import { CATALOGUE, wordIdFor } from "../src/domain/catalogue";
 import { DEFAULT_SETTINGS, type RoomSnapshot, type RoomState, type Stroke } from "../src/domain/types";
+import { productionHttpsRedirect } from "../src/server/worker";
 
 interface SessionResponse {
   code: string;
@@ -85,6 +87,14 @@ const send = async (
 };
 
 describe("Worker et Durable Object de salle", () => {
+  it("redirige toute requête HTTP de production vers la même URL en HTTPS", () => {
+    const redirect = productionHttpsRedirect(new Request("http://example.test/api/health?from=qr"), "production");
+    expect(redirect?.status).toBe(308);
+    expect(redirect?.headers.get("location")).toBe("https://example.test/api/health?from=qr");
+    expect(redirect?.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    expect(productionHttpsRedirect(new Request("http://localhost:8788/api/health"), "development")).toBeNull();
+  });
+
   it("borne et valide les entrées HTTP, sans exposer de réponse API sans protections", async () => {
     const malformed = await workerFetch("https://example.test/api/rooms", {
       method: "POST",
@@ -96,6 +106,7 @@ describe("Worker et Durable Object de salle", () => {
     expect(malformed.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(malformed.headers.get("x-content-type-options")).toBe("nosniff");
     expect(malformed.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+    expect(malformed.headers.get("strict-transport-security")).toBe("max-age=31536000");
 
     const oversized = await workerFetch("https://example.test/api/rooms", {
       method: "POST",
@@ -147,7 +158,7 @@ describe("Worker et Durable Object de salle", () => {
       tickets: [],
       turnSequence: 0,
       current: null,
-      usedWordIds: [],
+      usedWordIds: ["word-1"],
       finishedWinnerIds: [],
     };
     await runInDurableObject(stub, (_instance, state) => {
@@ -163,8 +174,61 @@ describe("Worker et Durable Object de salle", () => {
       const migrated = JSON.parse(payload) as Record<string, unknown> & { settings: Record<string, unknown> };
       expect(migrated.version).toBe(3);
       expect(migrated.revision).toBe(1);
+      expect(migrated.usedWordIds).toEqual([]);
       expect(migrated.lastActivityAt).toEqual(expect.any(Number));
       expect(migrated.settings).toEqual({ durationSeconds: 90, rounds: 5, difficulty: "moyen" });
+    });
+  });
+
+  it("remplace l’identifiant positionnel du mot courant lors de la reprise d’une salle active", async () => {
+    const code = "WRD123";
+    const stub = env.GAME_ROOM.getByName(`room:${code}`);
+    const now = Date.now();
+    const currentWord = CATALOGUE.find((word) => word.difficulty === DEFAULT_SETTINGS.difficulty)!;
+    const legacyState: RoomState = {
+      version: 3,
+      code,
+      createdAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+      revision: 0,
+      phase: "armed",
+      settings: DEFAULT_SETTINGS,
+      players: [{ id: "player-one", name: "Lila", score: 0, joinedAt: now }],
+      sessions: [{ id: "controller-one", token: "controller-token-legacy", role: "controller", displayMode: "projection", createdAt: now, lastSeenAt: now }],
+      tickets: [],
+      turnSequence: 1,
+      current: {
+        id: "turn-1",
+        round: 1,
+        drawerId: "player-one",
+        word: currentWord,
+        strokes: [],
+        redoStrokes: [],
+        pointCount: 0,
+        readyDeadlineAt: now + 30_000,
+        armedDeadlineAt: now + 30_000,
+        startedAt: null,
+        deadlineAt: null,
+        revealedAt: null,
+        winnerId: null,
+        nextDrawerId: null,
+        drawerTerminalSessionId: null,
+        canvasRevision: 0,
+      },
+      usedWordIds: ["word-1"],
+      finishedWinnerIds: [],
+    };
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("CREATE TABLE room_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)");
+      state.storage.sql.exec("INSERT INTO room_state (id, payload) VALUES (1, ?)", JSON.stringify(legacyState));
+    });
+    await evictDurableObject(stub);
+
+    await stub.join({ role: "terminal" });
+    await runInDurableObject(stub, (_instance, state) => {
+      const payload = JSON.parse(state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one().payload) as RoomState;
+      expect(payload.usedWordIds).toEqual([wordIdFor(currentWord.label, currentWord.theme, currentWord.difficulty)]);
     });
   });
 

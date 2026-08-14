@@ -2,6 +2,9 @@ import { CATALOGUE } from "./catalogue";
 import {
   DEFAULT_SETTINGS,
   DIFFICULTIES,
+  MAX_POINTS_PER_STROKE,
+  MAX_POINTS_PER_TURN,
+  MAX_STROKES_PER_TURN,
   type CurrentTurn,
   type DevicePresence,
   type GamePhase,
@@ -17,9 +20,7 @@ import {
 
 export class GameRuleError extends Error {}
 
-export const MAX_STROKES_PER_TURN = 240;
-export const MAX_POINTS_PER_STROKE = 1_024;
-export const MAX_POINTS_PER_TURN = 8_000;
+export { MAX_POINTS_PER_STROKE } from "./types";
 export const REVEAL_DURATION_MS = 5_000;
 export const READY_DURATION_MS = 30_000;
 

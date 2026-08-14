@@ -9,6 +9,7 @@ interface ApiError {
 }
 
 export const ROOM_CODE_LENGTH = 6;
+export const REQUEST_TIMEOUT_MS = 12_000;
 
 const ACTIVE_SESSION_KEY = "pictiofady.active-session";
 const LEGACY_SESSION_KEY = "prisme.active-session";
@@ -54,18 +55,37 @@ export const loadSession = (): StoredSession | null => {
   }
 };
 
-export const requestJson = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
-  const response = await fetch(path, init);
-  let data: (T & ApiError) | null = null;
+export const requestJson = async <T,>(path: string, init: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> => {
+  const requestController = new AbortController();
+  const callerSignal = init.signal;
+  let timedOut = false;
+  const abortFromCaller = (): void => requestController.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = globalThis.setTimeout(() => {
+    timedOut = true;
+    requestController.abort();
+  }, timeoutMs);
+
   try {
-    data = await response.json() as T & ApiError;
-  } catch {
-    // A proxy or unavailable edge can return a non-JSON error page. Keep the
-    // UI message stable without exposing that response body.
+    const response = await fetch(path, { ...init, signal: requestController.signal });
+    let data: (T & ApiError) | null = null;
+    try {
+      data = await response.json() as T & ApiError;
+    } catch {
+      // A proxy or unavailable edge can return a non-JSON error page. Keep the
+      // UI message stable without exposing that response body.
+    }
+    if (!response.ok) throw new Error(data?.error ?? "La requête a échoué.");
+    if (!data) throw new Error("Réponse serveur illisible.");
+    return data;
+  } catch (error) {
+    if (timedOut) throw new Error("Le serveur met trop de temps à répondre. Réessayez.");
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
-  if (!response.ok) throw new Error(data?.error ?? "La requête a échoué.");
-  if (!data) throw new Error("Réponse serveur illisible.");
-  return data;
 };
 
 export const roomSocketUrl = (code: string, ticket: string): string => {

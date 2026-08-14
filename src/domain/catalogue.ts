@@ -7,43 +7,58 @@ interface Dictionary {
   prompts: PromptsByTheme;
 }
 
-const prompts = dictionary as Dictionary;
-const PROMPTS_PER_DIFFICULTY = 75;
-const PROMPT_BATCH_SIZE = 25;
+const { prompts } = dictionary as Dictionary;
+const MIN_PROMPTS_PER_DIFFICULTY = 75;
+const labelsByDifficulty = new Map<Difficulty, Map<string, Theme>>(
+  DIFFICULTIES.map((difficulty) => [difficulty, new Map<string, Theme>()]),
+);
 
-const makeSeeds = (offset: number): Array<readonly [string, Theme, Difficulty]> => THEMES.flatMap((theme) => {
-  const themePrompts = prompts.prompts[theme];
-  const easyPrompts = themePrompts.facile.slice(offset, offset + PROMPT_BATCH_SIZE);
-  const mediumPrompts = themePrompts.moyen.slice(offset, offset + PROMPT_BATCH_SIZE);
-  const batchPrompts = [...easyPrompts, ...mediumPrompts];
-
-  if (themePrompts.facile.length !== PROMPTS_PER_DIFFICULTY || themePrompts.moyen.length !== PROMPTS_PER_DIFFICULTY) {
-    throw new Error(`Le thème ${theme} doit contenir ${PROMPTS_PER_DIFFICULTY} mots faciles et moyens.`);
+const stableHash = (value: string): string => {
+  let hash = 0xcbf29ce484222325n;
+  for (const character of value.normalize("NFC")) {
+    hash ^= BigInt(character.codePointAt(0)!);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
   }
-  if (batchPrompts.length !== PROMPT_BATCH_SIZE * 2 || themePrompts.difficile.length !== 12) {
-    throw new Error(`Le thème ${theme} contient une sélection de mots ou de qualificatifs incomplète.`);
-  }
+  return hash.toString(16).padStart(16, "0");
+};
 
-  return [
-    ...easyPrompts.map((label) => [label, theme, "facile"] as const),
-    ...mediumPrompts.map((label) => [label, theme, "moyen"] as const),
-    ...batchPrompts.flatMap((label) => themePrompts.difficile.map((qualifier) => [`${label} ${qualifier}`, theme, "difficile"] as const)),
-  ];
+export const wordIdFor = (label: string, theme: Theme, difficulty: Difficulty): string =>
+  `word-${theme}-${difficulty}-${stableHash(`${theme}\u0000${difficulty}\u0000${label.trim().toLocaleLowerCase("fr")}`)}`;
+
+const seeds: Array<readonly [string, Theme, Difficulty]> = THEMES.flatMap((theme) => {
+  const themePrompts = prompts[theme];
+  const labels = new Set<string>();
+
+  return DIFFICULTIES.flatMap((difficulty) => {
+    const difficultyPrompts = themePrompts[difficulty];
+    if (difficultyPrompts.length < MIN_PROMPTS_PER_DIFFICULTY) {
+      throw new Error(`Le thème ${theme} doit contenir au moins ${MIN_PROMPTS_PER_DIFFICULTY} entrées ${difficulty}.`);
+    }
+
+    return difficultyPrompts.map((label) => {
+      const normalizedLabel = label.trim().toLocaleLowerCase("fr");
+      if (!normalizedLabel) throw new Error(`Le thème ${theme} contient une entrée vide.`);
+      if (labels.has(normalizedLabel)) throw new Error(`Le thème ${theme} contient l’entrée en double « ${label} ».`);
+      const previousTheme = labelsByDifficulty.get(difficulty)!.get(normalizedLabel);
+      if (previousTheme) throw new Error(`Les thèmes ${previousTheme} et ${theme} contiennent la même entrée ${difficulty} « ${label} ».`);
+      labels.add(normalizedLabel);
+      labelsByDifficulty.get(difficulty)!.set(normalizedLabel, theme);
+      return [label, theme, difficulty] as const;
+    });
+  });
 });
 
-// Les lots préservent l'ordre historique des cartes, tandis que le dictionnaire
-// reste organisé simplement par thème puis par difficulté.
-const seeds = Array.from({ length: PROMPTS_PER_DIFFICULTY / PROMPT_BATCH_SIZE }, (_, index) => makeSeeds(index * PROMPT_BATCH_SIZE)).flat();
-
-export const CATALOGUE: Word[] = seeds.map(([label, theme, difficulty], index) => ({
-  id: `word-${index + 1}`,
+export const CATALOGUE: Word[] = seeds.map(([label, theme, difficulty]) => ({
+  id: wordIdFor(label, theme, difficulty),
   label,
   theme,
   difficulty,
 }));
 
 export const CATALOGUE_SIZE = CATALOGUE.length;
+if (new Set(CATALOGUE.map((word) => word.id)).size !== CATALOGUE_SIZE) throw new Error("Le catalogue contient une collision d’identifiants.");
 
-if (CATALOGUE_SIZE < 9_750) throw new Error("Le catalogue doit contenir au moins 9 750 mots.");
+const MIN_CATALOGUE_SIZE = THEMES.length * DIFFICULTIES.length * MIN_PROMPTS_PER_DIFFICULTY;
+if (CATALOGUE_SIZE < MIN_CATALOGUE_SIZE) throw new Error(`Le catalogue doit contenir au moins ${MIN_CATALOGUE_SIZE} entrées.`);
 
 export { DIFFICULTIES, THEMES };

@@ -13,6 +13,7 @@ export function useRoomConnection(session: StoredSession | null) {
   const reconnectAttemptRef = useRef(0);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [commandErrorSequence, setCommandErrorSequence] = useState(0);
   const [connected, setConnected] = useState(false);
   const [sessionUnavailable, setSessionUnavailable] = useState(false);
   const [roomDeleted, setRoomDeleted] = useState(false);
@@ -24,6 +25,7 @@ export function useRoomConnection(session: StoredSession | null) {
     snapshotRef.current = null;
     setSnapshot(null);
     setConnectionError(null);
+    setCommandErrorSequence(0);
     setConnected(false);
     setSessionUnavailable(false);
     setRoomDeleted(false);
@@ -98,6 +100,7 @@ export function useRoomConnection(session: StoredSession | null) {
             if (!message) throw new Error("invalid message");
             if (message.type === "error") {
               setConnectionError(message.message || "Commande refusée.");
+              setCommandErrorSequence((sequence) => sequence + 1);
               return;
             }
             const result = reduceRoomMessage(snapshotRef.current, message);
@@ -206,5 +209,5 @@ export function useRoomConnection(session: StoredSession | null) {
   }, []);
 
   const retry = useCallback(() => retryRef.current(), []);
-  return { snapshot, connectionError, connected, retry, send, sessionUnavailable, roomDeleted };
+  return { snapshot, connectionError, commandErrorSequence, connected, retry, send, sessionUnavailable, roomDeleted };
 }

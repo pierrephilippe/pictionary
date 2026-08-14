@@ -2,7 +2,7 @@
 
 ## Synthèse
 
-Cette revue ciblée couvre le client React/TypeScript, le Worker, le Durable Object, le protocole, le service worker et la configuration Cloudflare présents dans le dépôt. Les risques importants identifiés pendant l’audit ont été corrigés dans le code courant ; aucun finding critique ou élevé ne reste ouvert dans le périmètre inspecté. Deux risques moyens restent acceptés pour ce jeu local sans compte — la reprise via `localStorage` et le code de salle utilisé comme capacité d’accès — ainsi que deux sujets faibles de défense en profondeur et de preuve opérationnelle.
+Cette revue ciblée couvre le client React/TypeScript, le Worker, le Durable Object, le protocole, le service worker et la configuration Cloudflare présents dans le dépôt. Aucun finding critique n'a été découvert. Le code courant corrige la faille de transport HTTP observée en production, mais l'URL publique reste vulnérable jusqu'au prochain déploiement et à sa vérification. Trois risques moyens restent ouverts : la reprise via `localStorage`, le code de salle utilisé comme capacité d'accès et l'amplification de persistance/diffusion par commandes WebSocket.
 
 Ce résultat n’est ni un test d’intrusion ni une attestation du déploiement. Les bindings, en-têtes et versions réellement actifs doivent être contrôlés sur l’URL de production après chaque livraison.
 
@@ -26,14 +26,16 @@ Ce résultat n’est ni un test d’intrusion ni une attestation du déploiement
 - **Mesures actuelles :** jetons aléatoires à forte entropie, portée limitée à une salle, expiration de la salle après inactivité, validation stricte de la valeur relue, CSP restrictive et absence de point d’injection HTML brut repéré.
 - **Compromis produit :** le stockage persistant est conservé pour permettre la reprise PWA après mise en arrière-plan ou rechargement.
 
-### SEC-02 — Configuration présente, état du déploiement non attesté
+### SEC-02 — HTTP encore accepté sur le déploiement audité
 
-- **Sévérité : faible / assurance opérationnelle**
-- **Emplacements :** [`wrangler.jsonc`](wrangler.jsonc), lignes 28–48 et 115–135 ; [`public/_headers`](public/_headers), lignes 1–18 ; [`src/server/worker.ts`](src/server/worker.ts), lignes 14–27 et 106–112.
-- **Preuve :** le dépôt configure les rate limiters et les en-têtes, mais aucune capture récente de réponses de production ni export de configuration déployée n’accompagne cette mise à jour documentaire.
-- **Impact :** une dérive de configuration, un déploiement incomplet ou une route d’assets non couverte pourrait laisser la production moins protégée que le code revu.
-- **Action recommandée :** après déploiement, vérifier CSP, anti-cadrage, `nosniff`, politique de permissions, cache, réponses 429 et `Retry-After` sur l’URL publique ; superviser les 429 avant d’ajuster les seuils.
-- **Faux positif possible :** si ces contrôles sont déjà archivés par la CI ou une supervision externe, l’écart est documentaire et non technique.
+- **Sévérité : élevée sur la production observée ; corrigée dans le dépôt, déploiement requis.**
+- **Emplacements :** [`wrangler.jsonc`](wrangler.jsonc), bloc `assets` ; [`public/_headers`](public/_headers), lignes 1–8 ; [`src/server/worker.ts`](src/server/worker.ts), fonctions `productionHttpsRedirect`, `json` et `secureAssetResponse`.
+- **Preuve :** le 14 août 2026, `http://pictionary.fady.eu/` et `http://pictionary.fady.eu/api/health` répondaient `200 OK` sans redirection ; les réponses HTTPS n'envoyaient pas `Strict-Transport-Security`.
+- **Impact :** un attaquant présent sur le réseau peut injecter le JavaScript initial, voler le Bearer persistant puis contrôler ou supprimer une salle. Depuis HTTP, fetch, WebSocket et QR restent également non chiffrés.
+- **Cause racine :** les assets statiques pouvaient être servis avant le Worker et aucune règle edge ne forçait HTTPS.
+- **Correction dans le dépôt :** `run_worker_first: true`, redirection 308 en production avec conservation du chemin et de la requête, et HSTS `max-age=31536000` sur API et assets. `includeSubDomains` et `preload` ne sont volontairement pas activés sans audit de tous les sous-domaines.
+- **Action requise :** déployer ce commit, activer aussi « Always Use HTTPS » ou une Redirect Rule au niveau de la zone, puis vérifier HTTP `/`, `/api/health` et assets ainsi que HSTS sur HTTPS.
+- **Test associé :** `tests/room.test.ts` couvre la fonction de redirection, l'URL cible, le mode développement et HSTS API ; seul un contrôle post-déploiement prouve le comportement edge.
 
 ### SEC-03 — Pas de Trusted Types ni de télémétrie CSP
 
@@ -50,7 +52,18 @@ Ce résultat n’est ni un test d’intrusion ni une attestation du déploiement
 - **Preuve :** toute personne qui connaît le code peut créer une session terminale, dans la limite de 16, et le premier terminal autorisé qui réclame le tour devient celui du dessinateur. Il n’existe ni compte utilisateur ni approbation individuelle du contrôleur.
 - **Impact :** si le code est partagé hors du groupe, un tiers peut occuper les emplacements de terminal ou gagner la course d’affectation et voir le mot secret de la manche.
 - **Compromis produit :** PictioFady traite le code et le QR comme une invitation destinée aux personnes présentes autour du jeu. Les limites IP, session et WebSocket bornent l’amplification, mais ne transforment pas cette invitation en identité forte.
-- **Évolution recommandée si l’exposition change :** ajouter une invitation terminale à usage unique ou une file d’approbation contrôleur, ainsi qu’une liste permettant de révoquer les terminaux. Ne pas présenter le code publiquement dans un contexte non fiable.
+- **Évolution recommandée si l'exposition change :** ajouter une invitation terminale à usage unique ou une file d'approbation contrôleur, ainsi qu'une liste permettant de révoquer les terminaux. Ne pas présenter le code publiquement dans un contexte non fiable.
+
+### SEC-05 — Amplification WebSocket, SQLite et diffusion
+
+- **Sévérité : moyenne**
+- **Emplacements :** [`src/server/room.ts`](src/server/room.ts), gestion d'erreur de `webSocketMessage`, `applyCommand`, `broadcast` et `persist` ; [`src/domain/game.ts`](src/domain/game.ts), `setTerminalDisplayMode`.
+- **Preuve :** une commande refusée persiste le compteur dans le document complet. Une commande valide répétant le même mode est aussi considérée comme une mutation, actualise l'activité, réécrit l'état puis diffuse un snapshot complet à tous les sockets.
+- **Reproduction :** avec une session terminale, envoyer 39 commandes invalides ou `set_display_mode: drawing` identiques par seconde, juste sous la limite de 40.
+- **Impact :** amplification CPU, SQLite et bande passante à l'échelle d'une salle, surtout avec un canevas proche de 8 000 points et de nombreux sockets.
+- **Cause racine :** budget unique pour traits et contrôles, compteur anti-abus inclus dans le gros état métier, absence de no-op et snapshot global par défaut.
+- **Correction recommandée :** budgets séparés, quelques strikes puis fermeture 1008, compteur léger hors `RoomState`, détection stricte de no-op et diffusion ciblée. À terme, persister les fragments de trait en append plutôt que remplacer tout le JSON.
+- **Test recommandé :** instrumenter écritures et `send`; une rafale de no-op/refus ne doit ni incrémenter chaque révision ni diffuser chaque fois le canevas.
 
 ## Contrôles présents dans le dépôt
 
@@ -99,8 +112,9 @@ Les bindings Cloudflare appliquent une politique de protection et non un quota t
 
 - **Emplacements :** [`src/server/room.ts`](src/server/room.ts), lignes 73–146, 233–258 et 453–537.
 - Le constructeur lit l’existence de la table sans la créer. Seule la création explicite d’une salle initialise `room_state` ; rejoindre un code inconnu retourne 404 sans table métier.
-- L’état version 1 est migré vers la version 2, avec retrait de l’ancien réglage de thème et ajout des révisions et dates d’activité.
-- L’expiration de deux heures est calculée depuis la dernière activité et vérifiée avant les transitions métier. L’alarme suivante est le minimum entre expiration et échéance de phase.
+- Les états version 1 et 2 sont normalisés vers la version 3, avec difficulté singulière, retrait de l'ancien réglage de thème, révisions et dates d'activité.
+- L'expiration de deux heures est calculée depuis la dernière activité et vérifiée avant les transitions métier. L'alarme suivante est le minimum entre expiration et échéance de phase.
+- **Limite ouverte :** le JSON persistant n'est pas encore validé par un schéma par version et une version future n'est pas rejetée avant mutation ; un rollback pourrait donc réécrire un état incompatible. Ajouter des migrations pures et un refus sans écriture pour `version > 3`.
 
 ### SEC-16 — Cache PWA et chaîne de livraison
 

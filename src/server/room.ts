@@ -35,6 +35,7 @@ import {
   type Settings,
 } from "../domain/types";
 import { clientCommandSchema, type ClientCommand, type JoinRoomRequest, type ServerMessage } from "../shared/protocol";
+import { wordIdFor } from "../domain/catalogue";
 
 interface SocketAttachment {
   sessionId: string;
@@ -545,6 +546,10 @@ export class GameRoom extends DurableObject<Env> {
     state.lastActivityAt = Number.isFinite(state.lastActivityAt) ? state.lastActivityAt : state.updatedAt ?? state.createdAt;
     state.revision = Number.isInteger(state.revision) && state.revision >= 0 ? state.revision : 0;
     state.turnSequence ??= state.current?.round ?? 0;
+    if (state.usedWordIds.some((wordId) => /^word-\d+$/.test(wordId))) {
+      const currentWord = state.current?.word;
+      state.usedWordIds = currentWord ? [wordIdFor(currentWord.label, currentWord.theme, currentWord.difficulty)] : [];
+    }
     const persistedSessions = state.sessions as Array<Omit<Session, "role"> & { role: Role | "player"; playerId?: string }>;
     for (const legacySession of persistedSessions) {
       if (legacySession.role === "player") legacySession.role = "terminal";

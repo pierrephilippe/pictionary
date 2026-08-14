@@ -4,7 +4,7 @@ import { canAppendStrokes, describeStrokes, drawStroke, type PaintedStroke } fro
 
 interface DrawingCanvasProps {
   strokes: Stroke[];
-  draft?: Stroke | null;
+  drafts?: Stroke[];
   inverse: boolean;
   className?: string;
   onPointerDown?: (event: PointerEvent<HTMLCanvasElement>) => void;
@@ -18,7 +18,7 @@ interface DrawingCanvasProps {
 
 export function DrawingCanvas({
   strokes,
-  draft,
+  drafts = [],
   inverse,
   className,
   onPointerDown,
@@ -33,8 +33,8 @@ export function DrawingCanvas({
   const committedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const paintedRef = useRef<PaintedStroke[]>([]);
   const dimensionsRef = useRef({ width: 0, height: 0, scale: 0, inverse });
-  const contentsRef = useRef({ strokes, draft, inverse });
-  contentsRef.current = { strokes, draft, inverse };
+  const contentsRef = useRef({ strokes, drafts, inverse });
+  contentsRef.current = { strokes, drafts, inverse };
   const paint = useCallback((): void => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -83,13 +83,13 @@ export function DrawingCanvas({
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.drawImage(committedCanvas, 0, 0);
     context.setTransform(scale, 0, 0, scale, 0, 0);
-    if (contents.draft) drawStroke(context, contents.draft, contents.inverse, bounds.width, bounds.height);
+    for (const draft of contents.drafts) drawStroke(context, draft, contents.inverse, bounds.width, bounds.height);
     paintedRef.current = describeStrokes(contents.strokes);
     dimensionsRef.current = { width: pixelWidth, height: pixelHeight, scale, inverse: contents.inverse };
   }, []);
   useEffect(() => {
     paint();
-  }, [draft, inverse, paint, strokes]);
+  }, [drafts, inverse, paint, strokes]);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;

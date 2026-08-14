@@ -15,8 +15,21 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "content-security-policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'",
   "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
   "referrer-policy": "strict-origin-when-cross-origin",
+  "strict-transport-security": "max-age=31536000",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
+};
+
+export const productionHttpsRedirect = (request: Request, environment: string): Response | null => {
+  const url = new URL(request.url);
+  if (environment !== "production" || url.protocol !== "http:") return null;
+  url.protocol = "https:";
+  const headers = new Headers({
+    location: url.toString(),
+    "cache-control": "no-store",
+  });
+  for (const [name, header] of Object.entries(SECURITY_HEADERS)) headers.set(name, header);
+  return new Response(null, { status: 308, headers });
 };
 
 const json = (value: unknown, init: ResponseInit = {}): Response => {
@@ -115,6 +128,8 @@ const secureAssetResponse = (request: Request, response: Response): Response => 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const httpsRedirect = productionHttpsRedirect(request, env.ENVIRONMENT);
+    if (httpsRedirect) return httpsRedirect;
     if (!url.pathname.startsWith("/api/")) return secureAssetResponse(request, await env.ASSETS.fetch(request));
     if (request.method === "GET" && url.pathname === "/api/health") return json({ ok: true, environment: env.ENVIRONMENT });
 

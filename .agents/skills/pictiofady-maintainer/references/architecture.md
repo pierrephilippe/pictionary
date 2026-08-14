@@ -36,7 +36,8 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 - Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, puis peut dessiner ou résoudre immédiatement la manche.
 - Le serveur recalcule toutes les capacités (`canDraw`, `canTakeDrawingTurn`, `canSelectWinner`) et refuse toute commande hors rôle, session, tour ou phase.
 - Une seule résolution est admise. Le joueur désigné par le dessinateur devient toujours le dessinateur suivant; « Aucun gagnant » choisit aléatoirement un autre joueur. Les scores et le prochain dessinateur sont calculés par le serveur, jamais par le client.
-- Le catalogue de mots est interne et additif : `prompts` regroupe directement chaque univers par difficulté. Les variantes `difficile` du même univers qualifient ses mots faciles et moyens. La génération conserve un ordre stable pour que les cartes existantes gardent leur identifiant, et les tests protègent la diversité minimale.
+- Le catalogue de mots est interne : `prompts` regroupe directement chaque univers par difficulté dans le JSON éditorial. Chaque entrée est un mot ou concept autonome; le catalogue les aplatit sans fabriquer de variantes ni concaténer de qualificatifs. Les IDs dérivent de l'univers, du niveau et du libellé plutôt que de la position; les tests protègent au moins 75 entrées par univers/niveau et l'unicité globale des libellés dans chaque niveau.
+- À la restauration d'une salle antérieure aux IDs stables, les anciens `word-N` sont abandonnés afin de ne pas exclure un autre mot par erreur; le mot du tour courant est remappé vers son ID stable. Cette compatibilité peut seulement permettre la répétition d'un mot joué avant le déploiement pendant la courte vie résiduelle de la salle.
 - Après `finished`, seul le contrôleur peut envoyer `return_to_lobby`. La transition conserve joueurs, réglages et séquence de tours, mais remet scores, manche, gagnants et mots utilisés à zéro avant une nouvelle préparation.
 - Seul le contrôleur peut envoyer `delete_room`. Cette destruction efface l'état durable et l'alarme, ferme chaque WebSocket avec la raison `Room deleted`, puis interdit toute nouvelle invitation, tout ticket et toute reprise de la salle.
 
@@ -57,6 +58,7 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 - Le code/QR est une invitation, pas une identité. Une personne qui le connaît peut ouvrir un terminal; un groupe non fiable exigerait approbation/révocation par le contrôleur.
 - L'activité réseau de ticket ou de handshake ne doit pas, à elle seule, prolonger l'inactivité métier d'une salle.
 - Rate limits, CSP, cache du service worker et origine WebSocket sont des couches complémentaires, jamais des autorisations métier.
+- Tous les assets passent par le Worker (`run_worker_first: true`). En production, toute URL HTTP est redirigée en 308 vers la même URL HTTPS et toutes les réponses portent HSTS; ne pas réintroduire une route statique qui contourne cette frontière.
 - Lors d'un changement Wrangler, garder les bindings cohérents dans chaque environnement et régénérer les types.
 
 ## Impact minimal par changement
