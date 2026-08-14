@@ -6,13 +6,14 @@ L’interface peut être installée et son enveloppe statique reste disponible h
 
 ## Parcours utilisateur actuel
 
-- Sur mobile, l’accueil occupe deux moitiés superposées de 50 % du viewport : « Créer une partie » et « Rejoindre une partie ». Sur les écrans plus larges, ces deux zones ont la même largeur.
-- La création demande uniquement la difficulté, le nombre de manches et la durée d’une manche. Les thèmes restent internes au catalogue et tous peuvent alimenter le tirage ; il n’existe ni choix de thème ni bouton « Enregistrer ». Le bouton « Lancer avec ces réglages » démarre la partie avec les valeurs affichées.
+- L'accueil et les écrans applicatifs hors dessin occupent deux moitiés verticales de 50 % du viewport. Chaque moitié défile indépendamment lorsque son contenu est plus long.
+- La création place QR code et lien direct en haut, puis joueurs, difficulté, nombre de manches, durée et démarrage en bas. Les thèmes restent internes au catalogue; il n'existe ni choix de thème ni bouton « Enregistrer ». « Démarrer la partie » reste indisponible tant qu'un projecteur et un autre téléphone de dessin ne sont pas connectés.
 - La saisie d’un code utilise six cases, convertit les lettres en majuscules, écarte les caractères ambigus et rejoint automatiquement la salle au sixième caractère.
 - Le lien et le QR code utilisent l’URL directe `/?join=CODE`. L’ouverture de cette URL préremplit le code et tente immédiatement la connexion.
-- L’écran du dessinateur privilégie la zone de dessin. Un menu regroupe le crayon, la gomme, l’épaisseur, annuler, rétablir et l’effacement confirmé ; la sélection du gagnant est présentée séparément.
+- L’écran du dessinateur est l'exception au 50/50 : une barre toujours visible regroupe le crayon, la gomme, l’épaisseur, annuler, rétablir et l’effacement confirmé au-dessus du canevas. Une action pleine largeur en bas interrompt la manche et ouvre la sélection du gagnant.
 - Pendant la phase de dessin, le projecteur masque le mot, le chronomètre, les scores et les indications de manche : seule la toile est rendue. Un toucher peut faire apparaître brièvement les contrôles techniques de projection. Une perte de connexion constitue la seule exception et affiche une reprise explicite plutôt qu’une image figée. Les informations de partie reviennent avant, entre et après les manches.
 - Chaque vue projetée est pré-inversée horizontalement afin que le dessin et le texte retrouvent leur sens normal après la réflexion du plexiglas.
+- La projection ne propose que le plexiglas en V à deux faces. Sa composition reste identique en portrait et paysage, sans message ni verrouillage d'orientation.
 
 ## Prérequis
 
@@ -52,7 +53,7 @@ npm run check
 - [`src/client/drawing`](src/client/drawing) isole le modèle de rendu et le composant canevas réutilisé par le dessinateur et la projection.
 - [`src/client/App.tsx`](src/client/App.tsx) orchestre les écrans et les interactions de jeu.
 
-Le démarrage est une commande atomique `start_game { settings }` : des réglages invalides ne peuvent pas être enregistrés séparément. Chaque état persisté possède une `revision`. Les deltas de trait transportent aussi `turnId`, `canvasRevision` et `offset` ; un fragment ancien, manquant ou reçu après annulation, rétablissement ou effacement provoque une resynchronisation au lieu de corrompre la toile. Une seule connexion WebSocket reste active par session.
+Le démarrage est une commande atomique `start_game { settings }` : des réglages invalides ne peuvent pas être enregistrés séparément. Le Durable Object vérifie aussi la présence réelle d'un projecteur et d'un autre téléphone en mode dessin. Chaque état persisté possède une `revision`. Les deltas de trait transportent aussi `turnId`, `canvasRevision` et `offset` ; un fragment ancien, manquant ou reçu après annulation, rétablissement ou effacement provoque une resynchronisation au lieu de corrompre la toile. Une seule connexion WebSocket reste active par session.
 
 ## Déroulé et projection
 
@@ -60,7 +61,9 @@ Une salle accepte de 1 à 12 joueurs inscrits et jusqu’à 16 sessions de tél�
 
 Le dessinateur peut interrompre la manche dès qu’un joueur trouve. À la fin du chronomètre, le dessin se fige et la partie attend sa décision : s’il choisit « Aucun gagnant », personne ne marque et le prochain dessinateur est tiré au sort parmi les autres joueurs. Un dessinateur qui ne se déclare pas prêt ou ne commence pas à dessiner est remplacé après 30 secondes. Le mot est ensuite révélé pendant cinq secondes avant l’enchaînement automatique.
 
-Le projecteur propose une mire pour pyramide à quatre faces, plexiglas en V à deux faces ou plaque simple. Pour de meilleurs résultats, augmenter la luminosité, activer le mode projection et centrer le support sur la mire. La pyramide impose le portrait ; le V et la plaque imposent le paysage. L’application demande le plein écran et le verrouillage correspondant, puis bloque le rendu avec une consigne de rotation si le navigateur refuse ou si l’appareil est mal orienté.
+Le projecteur utilise uniquement un plexiglas en V à deux faces. Le stage reste au ratio 2:1 avec deux cellules carrées et les mêmes transformations en portrait comme en paysage; seule son échelle s'adapte à l'espace disponible. L'application ne verrouille pas l'orientation et n'affiche aucune consigne de rotation. Pour de meilleurs résultats, augmenter la luminosité, activer la projection et centrer le V sur la mire.
+
+À la fin, le contrôleur peut préparer une nouvelle partie. Les joueurs et les réglages sont conservés, tandis que les scores, la manche courante, le classement final et l'historique des mots sont réinitialisés côté serveur.
 
 ## Fiabilité, limites et sécurité
 
@@ -99,8 +102,8 @@ Les comportements dépendant du matériel ou du navigateur ne sont pas prouvés 
 
 - scanner le QR code et confirmer la connexion directe sur iOS et Android ;
 - contrôler la saisie tactile, le clavier mobile et l’affichage 50/50 sur plusieurs hauteurs d’écran ;
-- vérifier le sens réel après réflexion sur les trois supports, en particulier la pyramide ;
-- tester le plein écran, l’orientation et la reprise du Wake Lock après un passage en arrière-plan ;
+- vérifier sur le plexiglas en V le sens réel après réflexion et la stabilité de la composition en portrait puis paysage ;
+- tester le plein écran, la rotation physique de l'appareil et la reprise du Wake Lock après un passage en arrière-plan ;
 - couper puis rétablir le réseau pendant un trait, après un effacement et entre deux manches ;
 - refaire les mesures Lighthouse, Core Web Vitals et tailles de bundle sur le build final.
 

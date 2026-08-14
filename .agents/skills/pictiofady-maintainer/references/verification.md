@@ -30,7 +30,7 @@ Le script du skill sélectionne un sous-ensemble sans mémoriser les longues com
 | Code de salle, session locale, URL directe | `tests/session.test.ts` |
 | Fusion snapshot/delta, reprises, offsets | `tests/room-state.test.ts` |
 | Modèle de rendu du dessin | `tests/drawing.test.ts` |
-| Support de projection, orientation et persistance du choix | `tests/projection.test.ts` |
+| Contrat de projection en V à deux faces | `tests/projection.test.ts` |
 | Phases, scores, autorisations métier | `tests/game.test.ts` |
 | Durable Object, tickets, WebSockets, alarmes, migrations | `tests/room.test.ts` |
 | Limites HTTP par IP/session | `tests/rate-limit.test.ts` |
@@ -50,7 +50,7 @@ Les tests actuels n'exercent pas un DOM React complet. Une modification d'intera
 
 - Code, protocole, serveur ou configuration : scope ciblé pendant l'itération, puis `npm run check` avant livraison.
 - Documentation/skill uniquement : `git diff --check HEAD`, validation du skill et contrôle des liens/commandes cités.
-- UI : build + recette des viewports touchés, navigation clavier et état de connexion.
+- UI : build + recette des viewports touchés, navigation clavier et état de connexion. Pour la projection, comparer ratio, cellules et transformations en portrait puis paysage.
 - Temps réel : inclure ordre ancien/nouveau, duplications, reconnexion, deuxième session/onglet et alarmes lorsque pertinent.
 - Sécurité : démontrer le refus côté serveur et un test d'abus; ne pas conclure à partir d'un bouton masqué.
 

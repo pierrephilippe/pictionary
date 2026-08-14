@@ -2,6 +2,7 @@ import { CATALOGUE } from "./catalogue";
 import {
   DEFAULT_SETTINGS,
   type CurrentTurn,
+  type DevicePresence,
   type GamePhase,
   type Player,
   type RoomSnapshot,
@@ -20,6 +21,12 @@ export const MAX_POINTS_PER_STROKE = 1_024;
 export const MAX_POINTS_PER_TURN = 8_000;
 export const REVEAL_DURATION_MS = 5_000;
 export const READY_DURATION_MS = 30_000;
+
+const EMPTY_DEVICE_PRESENCE: DevicePresence = {
+  projectors: 0,
+  drawingPhones: 0,
+  hasRequiredDevices: false,
+};
 
 export interface AppendStrokeResult {
   deadlineAt: number | null;
@@ -377,7 +384,22 @@ export function nextTurn(state: RoomState, now: number): void {
   state.updatedAt = now;
 }
 
-export function snapshotFor(state: RoomState, session: Session, now: number): RoomSnapshot {
+export function returnToLobby(state: RoomState, now: number): void {
+  if (state.phase !== "finished") throw new GameRuleError("La partie n’est pas terminée.");
+  for (const player of state.players) player.score = 0;
+  state.phase = "lobby";
+  state.current = null;
+  state.usedWordIds = [];
+  state.finishedWinnerIds = [];
+  state.updatedAt = now;
+}
+
+export function snapshotFor(
+  state: RoomState,
+  session: Session,
+  now: number,
+  devicePresence: DevicePresence = EMPTY_DEVICE_PRESENCE,
+): RoomSnapshot {
   const current = state.current;
   const drawer = current ? getPlayer(state, current.drawerId) : null;
   const revealed = state.phase === "revealing" || state.phase === "finished";
@@ -407,6 +429,7 @@ export function snapshotFor(state: RoomState, session: Session, now: number): Ro
     canTakeDrawingTurn: canUseDrawingTerminal && state.phase === "awaiting_ready" && (!current?.drawerTerminalSessionId || current.drawerTerminalSessionId === session.id),
     canSelectWinner: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["drawing", "resolving"].includes(state.phase),
     displayMode,
+    devicePresence: structuredClone(devicePresence),
     secretWord: canUseDrawingTerminal && session.id === current?.drawerTerminalSessionId && ["armed", "drawing", "resolving"].includes(state.phase)
       ? current?.word?.label ?? null
       : null,

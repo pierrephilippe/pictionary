@@ -14,6 +14,7 @@ import {
   removePlayer,
   redo,
   ready,
+  returnToLobby,
   selectWinner,
   setTerminalDisplayMode,
   snapshotFor,
@@ -250,6 +251,37 @@ describe("moteur de jeu", () => {
 
     expect(() => selectWinner(state, terminal.id, "player-2", 8)).toThrow(GameRuleError);
     expect(state.players.map((candidate) => candidate.score)).toEqual([1, 1]);
+  });
+
+  it("prépare une nouvelle partie sans réutiliser les identifiants de tour", () => {
+    const state = startedRoom();
+    const previousTurnSequence = state.turnSequence;
+    state.players[0]!.score = 4;
+    state.players[1]!.score = 2;
+    state.usedWordIds = ["animaux-chat-facile"];
+    state.finishedWinnerIds = [state.players[0]!.id];
+    state.phase = "finished";
+
+    returnToLobby(state, 42);
+
+    expect(state.phase).toBe("lobby");
+    expect(state.current).toBeNull();
+    expect(state.players.map((candidate) => ({ name: candidate.name, score: candidate.score }))).toEqual([
+      { name: "Lila", score: 0 },
+      { name: "Noé", score: 0 },
+    ]);
+    expect(state.settings).toEqual(DEFAULT_SETTINGS);
+    expect(state.usedWordIds).toEqual([]);
+    expect(state.finishedWinnerIds).toEqual([]);
+    expect(state.turnSequence).toBe(previousTurnSequence);
+    expect(state.updatedAt).toBe(42);
+
+    startGame(state, DEFAULT_SETTINGS, 43, deterministic);
+    expect(state.current?.id).toBe(`turn-${previousTurnSequence + 1}`);
+  });
+
+  it("refuse de préparer une nouvelle partie avant le résultat final", () => {
+    expect(() => returnToLobby(startedRoom(), 10)).toThrow("La partie n’est pas terminée.");
   });
 
   it("arrête le dessin à l’échéance et permet de rétablir un trait annulé", () => {

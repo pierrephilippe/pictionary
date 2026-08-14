@@ -35,6 +35,7 @@ const snapshot = (revision = 10): RoomSnapshot => ({
   canTakeDrawingTurn: false,
   canSelectWinner: false,
   displayMode: "projection",
+  devicePresence: { projectors: 1, drawingPhones: 1, hasRequiredDevices: true },
   secretWord: null,
   finishedWinnerIds: [],
   serverNow: 1_000,

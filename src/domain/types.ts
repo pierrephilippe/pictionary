@@ -7,7 +7,6 @@ export type Theme = (typeof THEMES)[number];
 export type Difficulty = (typeof DIFFICULTIES)[number];
 export type Role = "controller" | "terminal";
 export type TerminalDisplayMode = "drawing" | "projection";
-export type ProjectionLayout = "pyramid" | "vee" | "single";
 export type GamePhase = "lobby" | "awaiting_ready" | "armed" | "drawing" | "resolving" | "revealing" | "finished";
 export type Tool = "pen" | "eraser";
 
@@ -113,6 +112,12 @@ export interface PublicTurn {
   canvasRevision: number;
 }
 
+export interface DevicePresence {
+  projectors: number;
+  drawingPhones: number;
+  hasRequiredDevices: boolean;
+}
+
 export interface RoomSnapshot {
   code: string;
   revision: number;
@@ -124,6 +129,7 @@ export interface RoomSnapshot {
   canTakeDrawingTurn: boolean;
   canSelectWinner: boolean;
   displayMode: TerminalDisplayMode;
+  devicePresence: DevicePresence;
   secretWord: string | null;
   finishedWinnerIds: string[];
   serverNow: number;

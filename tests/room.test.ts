@@ -274,6 +274,109 @@ describe("Worker et Durable Object de salle", () => {
     await expect(closed).resolves.toMatchObject({ code: 1008 });
   });
 
+  it("exige un projecteur et un autre téléphone de dessin réellement connectés", async () => {
+    const roomResponse = await workerFetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+    const playerSnapshot = await send(
+      controllerSocket,
+      { type: "add_player", name: "Lila" },
+      (message) => message.type === "snapshot" && message.snapshot?.players.length === 1,
+    );
+    expect(playerSnapshot.snapshot?.devicePresence).toEqual({
+      projectors: 1,
+      drawingPhones: 0,
+      hasRequiredDevices: false,
+    });
+
+    const joined = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const terminal = await json<SessionResponse>(joined);
+    const disconnectedStart = await send(
+      controllerSocket,
+      { type: "start_game", settings: DEFAULT_SETTINGS },
+      (message) => message.type === "error",
+    );
+    expect(disconnectedStart).toMatchObject({ type: "error", message: "Connectez un autre téléphone en mode dessin." });
+
+    const drawingPresence = waitForMessage(
+      controllerSocket,
+      (message) => message.type === "snapshot" && message.snapshot?.devicePresence.hasRequiredDevices === true,
+    );
+    const terminalSocket = await openSocket(controller.code, terminal.token);
+    await expect(drawingPresence).resolves.toMatchObject({
+      snapshot: { devicePresence: { projectors: 1, drawingPhones: 1, hasRequiredDevices: true } },
+    });
+
+    const projectorPresence = waitForMessage(
+      controllerSocket,
+      (message) => message.type === "snapshot" && message.snapshot?.devicePresence.drawingPhones === 0,
+    );
+    await send(
+      terminalSocket,
+      { type: "set_display_mode", displayMode: "projection" },
+      (message) => message.type === "snapshot" && message.snapshot?.displayMode === "projection",
+    );
+    await expect(projectorPresence).resolves.toMatchObject({
+      snapshot: { devicePresence: { projectors: 2, drawingPhones: 0, hasRequiredDevices: false } },
+    });
+    const projectionOnlyStart = await send(
+      controllerSocket,
+      { type: "start_game", settings: DEFAULT_SETTINGS },
+      (message) => message.type === "error",
+    );
+    expect(projectionOnlyStart).toMatchObject({ type: "error", message: "Connectez un autre téléphone en mode dessin." });
+
+    const restoredPresence = waitForMessage(
+      controllerSocket,
+      (message) => message.type === "snapshot" && message.snapshot?.devicePresence.hasRequiredDevices === true,
+    );
+    await send(
+      terminalSocket,
+      { type: "set_display_mode", displayMode: "drawing" },
+      (message) => message.type === "snapshot" && message.snapshot?.displayMode === "drawing",
+    );
+    await restoredPresence;
+
+    const closedPresence = waitForMessage(
+      controllerSocket,
+      (message) => message.type === "snapshot" && message.snapshot?.devicePresence.drawingPhones === 0,
+    );
+    terminalSocket.close();
+    await expect(closedPresence).resolves.toMatchObject({
+      snapshot: { devicePresence: { projectors: 1, drawingPhones: 0, hasRequiredDevices: false } },
+    });
+    const closedStart = await send(
+      controllerSocket,
+      { type: "start_game", settings: DEFAULT_SETTINGS },
+      (message) => message.type === "error",
+    );
+    expect(closedStart).toMatchObject({ type: "error", message: "Connectez un autre téléphone en mode dessin." });
+
+    const reconnectedPresence = waitForMessage(
+      controllerSocket,
+      (message) => message.type === "snapshot" && message.snapshot?.devicePresence.hasRequiredDevices === true,
+    );
+    const reconnectedTerminalSocket = await openSocket(controller.code, terminal.token);
+    await reconnectedPresence;
+    const started = await send(
+      controllerSocket,
+      { type: "start_game", settings: DEFAULT_SETTINGS },
+      (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready",
+    );
+    expect(started.snapshot?.phase).toBe("awaiting_ready");
+
+    controllerSocket.close();
+    reconnectedTerminalSocket.close();
+  });
+
   it("sépare joueurs et terminaux, et laisse le dessinateur valider le gagnant", async () => {
     const roomResponse = await workerFetch("https://example.test/api/rooms", {
       method: "POST",
@@ -450,6 +553,78 @@ describe("Worker et Durable Object de salle", () => {
       expect(persisted.current?.round).toBe(2);
       expect(persisted.current?.drawerId).toBe(winnerId);
     });
+  });
+
+  it("permet seulement au contrôleur de préparer puis relancer une nouvelle partie", async () => {
+    const roomResponse = await workerFetch("https://example.test/api/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const controller = await json<SessionResponse>(roomResponse);
+    const joined = await workerFetch(`https://example.test/api/rooms/${controller.code}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "terminal" }),
+    });
+    const terminal = await json<SessionResponse>(joined);
+    const controllerSocket = await openSocket(controller.code, controller.token);
+    const terminalSocket = await openSocket(controller.code, terminal.token);
+    const added = await send(
+      controllerSocket,
+      { type: "add_player", name: "Lila" },
+      (message) => message.type === "snapshot" && message.snapshot?.players.length === 1,
+    );
+    const playerId = added.snapshot?.players[0]?.id;
+    if (!playerId) throw new Error("Joueur absent.");
+
+    controllerSocket.close();
+    terminalSocket.close();
+
+    const stub = env.GAME_ROOM.getByName(`room:${controller.code}`);
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ payload: string }>("SELECT payload FROM room_state WHERE id = 1").one();
+      const persisted = JSON.parse(row.payload) as RoomState;
+      persisted.phase = "finished";
+      persisted.players[0]!.score = 3;
+      persisted.current = null;
+      persisted.usedWordIds = ["animaux-chat-facile"];
+      persisted.finishedWinnerIds = [playerId];
+      state.storage.sql.exec("UPDATE room_state SET payload = ? WHERE id = 1", JSON.stringify(persisted));
+    });
+    await evictDurableObject(stub);
+
+    const resumedControllerSocket = await openSocket(controller.code, controller.token);
+    const resumedTerminalSocket = await openSocket(controller.code, terminal.token);
+    const terminalRejected = await send(
+      resumedTerminalSocket,
+      { type: "return_to_lobby" },
+      (message) => message.type === "error",
+    );
+    expect(terminalRejected).toMatchObject({ type: "error", message: "Réservé au contrôleur de jeu." });
+
+    const lobby = await send(
+      resumedControllerSocket,
+      { type: "return_to_lobby" },
+      (message) => message.type === "snapshot" && message.snapshot?.phase === "lobby",
+    );
+    expect(lobby.snapshot).toMatchObject({
+      phase: "lobby",
+      turn: null,
+      players: [{ id: playerId, name: "Lila", score: 0 }],
+      finishedWinnerIds: [],
+      devicePresence: { projectors: 1, drawingPhones: 1, hasRequiredDevices: true },
+    });
+
+    const restarted = await send(
+      resumedControllerSocket,
+      { type: "start_game", settings: DEFAULT_SETTINGS },
+      (message) => message.type === "snapshot" && message.snapshot?.phase === "awaiting_ready",
+    );
+    expect(restarted.snapshot?.turn?.round).toBe(1);
+
+    resumedControllerSocket.close();
+    resumedTerminalSocket.close();
   });
 
   it("borne le nombre de terminaux persistés dans une salle", async () => {

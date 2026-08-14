@@ -15,6 +15,7 @@ import {
   ready,
   redo,
   removePlayer,
+  returnToLobby,
   selectWinner,
   setTerminalDisplayMode,
   snapshotFor,
@@ -23,7 +24,7 @@ import {
   undo,
   clear,
 } from "../domain/game";
-import { DEFAULT_SETTINGS, type Role, type RoomState, type Session } from "../domain/types";
+import { DEFAULT_SETTINGS, type DevicePresence, type Role, type RoomState, type Session } from "../domain/types";
 import { clientCommandSchema, type ClientCommand, type JoinRoomRequest, type ServerMessage } from "../shared/protocol";
 
 interface SocketAttachment {
@@ -176,7 +177,7 @@ export class GameRoom extends DurableObject<Env> {
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ sessionId: ticket.sessionId } satisfies SocketAttachment);
-    this.sendSnapshot(server, session);
+    this.broadcast();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -222,10 +223,12 @@ export class GameRoom extends DurableObject<Env> {
 
   async webSocketClose(ws: WebSocket): Promise<void> {
     this.safeClose(ws, 1000, "Closed");
+    this.broadcast();
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.safeClose(ws, 1011, "WebSocket error");
+    this.broadcast();
   }
 
   async alarm(): Promise<void> {
@@ -289,7 +292,12 @@ export class GameRoom extends DurableObject<Env> {
         break;
       case "start_game":
         requireController();
+        this.assertRequiredDevices();
         startGame(state, command.settings, now, secureRandom);
+        break;
+      case "return_to_lobby":
+        requireController();
+        returnToLobby(state, now);
         break;
       case "set_display_mode":
         setTerminalDisplayMode(state, session, command.displayMode, now);
@@ -365,7 +373,7 @@ export class GameRoom extends DurableObject<Env> {
   private sendSnapshot(ws: WebSocket, session: Session): void {
     this.safeSend(ws, {
       type: "snapshot",
-      snapshot: snapshotFor(this.requireState(), session, Date.now()),
+      snapshot: snapshotFor(this.requireState(), session, Date.now(), this.devicePresence()),
     });
   }
 
@@ -404,6 +412,36 @@ export class GameRoom extends DurableObject<Env> {
       return null;
     }
     return { sessionId: attachment.sessionId };
+  }
+
+  private devicePresence(): DevicePresence {
+    const state = this.requireState();
+    const activeSessionIds = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      const attachment = this.socketAttachment(ws);
+      if (attachment) activeSessionIds.add(attachment.sessionId);
+    }
+
+    let projectors = 0;
+    let drawingPhones = 0;
+    for (const sessionId of activeSessionIds) {
+      const session = state.sessions.find((candidate) => candidate.id === sessionId);
+      if (!session) continue;
+      if (session.role === "controller" || session.displayMode === "projection") projectors += 1;
+      else if (session.role === "terminal") drawingPhones += 1;
+    }
+    return {
+      projectors,
+      drawingPhones,
+      hasRequiredDevices: projectors > 0 && drawingPhones > 0,
+    };
+  }
+
+  private assertRequiredDevices(): void {
+    const presence = this.devicePresence();
+    if (presence.projectors < 1) throw new GameRuleError("Connectez un téléphone projecteur.");
+    if (presence.drawingPhones < 1) throw new GameRuleError("Connectez un autre téléphone en mode dessin.");
   }
 
   private getSessionByToken(token: string): Session {

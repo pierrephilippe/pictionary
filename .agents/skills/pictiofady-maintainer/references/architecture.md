@@ -11,7 +11,7 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 
 - Le Durable Object est l'autorité pour la salle, les rôles, le mot secret, les délais, le dessin, les scores et les transitions.
 - `RoomState` est durable. `RoomSnapshot` est la vue publique filtrée par session. Le reducer client est la seule fusion du réseau dans l'état React.
-- Les brouillons de réglages, préférences de projection, outils et gestes en cours restent éphémères côté client.
+- Les brouillons de réglages, outils et gestes en cours restent éphémères côté client. La présence des appareils est éphémère côté salle et n'entre jamais dans `RoomState`.
 
 ## Carte des modules
 
@@ -32,10 +32,11 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 ## Invariants métier
 
 - Phases : `lobby -> awaiting_ready -> armed -> drawing -> resolving -> revealing -> finished`. `resolving` fige la toile après le chrono et attend une décision explicite du dessinateur; les alarmes font progresser ou expirer la salle côté serveur.
-- Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }`. Les réglages publics ne contiennent que durée, nombre de manches et difficultés.
+- Le contrôleur inscrit les joueurs et lance atomiquement `start_game { settings }`. Le Durable Object exige alors un projecteur WebSocket actif et un autre terminal actif en mode dessin; une session HTTP simplement créée ne compte pas.
 - Un terminal prend le tour attendu, reçoit seul le mot lorsqu'il est dessinateur, se déclare prêt, dessine puis résout la manche.
 - Le serveur recalcule toutes les capacités (`canDraw`, `canTakeDrawingTurn`, `canSelectWinner`) et refuse toute commande hors rôle, session, tour ou phase.
 - Une seule résolution est admise. Le joueur désigné par le dessinateur devient toujours le dessinateur suivant; « Aucun gagnant » choisit aléatoirement un autre joueur. Les scores et le prochain dessinateur sont calculés par le serveur, jamais par le client.
+- Après `finished`, seul le contrôleur peut envoyer `return_to_lobby`. La transition conserve joueurs, réglages et séquence de tours, mais remet scores, manche, gagnants et mots utilisés à zéro avant une nouvelle préparation.
 
 ## Invariants de synchronisation
 
@@ -45,6 +46,7 @@ React -> commande Zod -> Worker HTTP/WS -> GameRoom Durable Object
 - Les commandes discrètes doivent être atomiques ou corrélables. Ne jamais envoyer séparément configuration puis démarrage.
 - Une tentative WebSocket obsolète ne doit pas modifier l'état courant. Une seule connexion active est conservée par session; une fermeture de remplacement ne boucle pas automatiquement.
 - Une diffusion défaillante isole et ferme le socket fautif sans annuler une mutation déjà persistée ni priver les autres clients.
+- `RoomSnapshot.devicePresence` est recalculé depuis les WebSockets ouverts, dédupliqués par session, puis rediffusé aux connexions, changements de mode et déconnexions. Une mise à jour de présence peut conserver la même `revision` métier.
 
 ## Frontières de sécurité et de durée de vie
 
