@@ -11,9 +11,15 @@ export const PROJECTION_LAYOUTS = {
 
 const PROJECTION_LAYOUT_KEY = "pictiofady.projection-layout";
 
-interface OrientationController {
+export interface OrientationController {
   lock?: (orientation: ProjectionOrientation) => Promise<void>;
   unlock?: () => void;
+}
+
+export interface ProjectionOrientationLock {
+  lock: (layout: ProjectionLayout) => Promise<void>;
+  release: () => void;
+  cancel: () => void;
 }
 
 export const requiredProjectionOrientation = (layout: ProjectionLayout): ProjectionOrientation =>
@@ -41,6 +47,51 @@ export function unlockProjectionOrientation(orientation: OrientationController |
   } catch {
     // Unlocking is best effort when a browser already released the lock.
   }
+}
+
+/**
+ * Serialises Screen Orientation API calls and publishes only the newest
+ * request. Browsers may reject a superseded lock or resolve it after a newer
+ * layout/exit request; both cases must leave the latest intent authoritative.
+ */
+export function createProjectionOrientationLock(
+  orientation: OrientationController | undefined,
+  onState: (state: OrientationLockState) => void,
+): ProjectionOrientationLock {
+  let generation = 0;
+  let queue: Promise<void> = Promise.resolve();
+
+  const invalidate = (publishIdle: boolean): void => {
+    generation += 1;
+    unlockProjectionOrientation(orientation);
+    if (publishIdle) onState("idle");
+  };
+
+  return {
+    lock(layout) {
+      const requestGeneration = ++generation;
+      const request = queue.then(async () => {
+        if (requestGeneration !== generation) return;
+        const state = await lockProjectionOrientation(layout, orientation);
+        if (requestGeneration !== generation) {
+          // A successful obsolete request can acquire the physical lock after
+          // an exit or layout change. Release it before the queued winner runs.
+          if (state === "locked") unlockProjectionOrientation(orientation);
+          return;
+        }
+        onState(state);
+      });
+      queue = request.catch(() => undefined);
+      return request;
+    },
+    release() {
+      invalidate(true);
+    },
+    cancel() {
+      // Used by React cleanup: invalidate pending work without setState.
+      invalidate(false);
+    },
+  };
 }
 
 export function loadProjectionLayout(storage: Pick<Storage, "getItem"> | undefined): ProjectionLayout {

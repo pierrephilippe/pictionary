@@ -25,13 +25,12 @@ import {
 import { useRoomConnection } from "./useRoomConnection";
 import { DrawingCanvas } from "./drawing/DrawingCanvas";
 import {
+  createProjectionOrientationLock,
   loadProjectionLayout,
-  lockProjectionOrientation,
   PROJECTION_LAYOUTS,
   projectionOrientationMatches,
   requiredProjectionOrientation,
   saveProjectionLayout,
-  unlockProjectionOrientation,
   type OrientationLockState,
 } from "./projection";
 
@@ -646,6 +645,38 @@ function ProjectionCue({ snapshot }: { snapshot: RoomSnapshot }) {
   return <div key={`${turn?.id ?? "lobby"}-${snapshot.phase}`} className="holo-cue"><strong>{content.title}</strong><span>{content.detail}</span>{content.deadlineAt && content.deadlineLabel ? <PhaseCountdown deadlineAt={content.deadlineAt} serverNow={snapshot.serverNow} label={content.deadlineLabel} /> : null}</div>;
 }
 
+type ProjectionFullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+const projectionFullscreenActive = (): boolean => {
+  const fullscreenDocument = document as ProjectionFullscreenDocument;
+  return Boolean(document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement);
+};
+
+const requestProjectionFullscreen = async (): Promise<boolean> => {
+  const fullscreenElement = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+  const request = fullscreenElement.requestFullscreen?.bind(fullscreenElement) ?? fullscreenElement.webkitRequestFullscreen?.bind(fullscreenElement);
+  try {
+    await request?.();
+  } catch {
+    // iOS and embedded browsers can refuse native fullscreen. CSS immersive
+    // mode remains active and orientation falls back to a manual instruction.
+  }
+  return projectionFullscreenActive();
+};
+
+const exitProjectionFullscreen = async (): Promise<void> => {
+  const fullscreenDocument = document as ProjectionFullscreenDocument;
+  const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
+  try {
+    await exit?.();
+  } catch {
+    // Exiting is best effort when the browser already released fullscreen.
+  }
+};
+
 function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLabel, onReconnect, onLeave, onUseDrawingTerminal }: { snapshot: RoomSnapshot; connected: boolean; connectionMessage: string | null; reconnectLabel: string; onReconnect: () => void; onLeave: () => void; onUseDrawingTerminal?: () => void }) {
   const [layout, setLayout] = useState<ProjectionLayout>(() => {
     try {
@@ -662,7 +693,22 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
   const [orientationLockState, setOrientationLockState] = useState<OrientationLockState>("idle");
   const [orientationMatches, setOrientationMatches] = useState(() => projectionOrientationMatches(layout, window.innerWidth, window.innerHeight));
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const layoutRef = useRef(layout);
+  const mountedRef = useRef(false);
+  const fullscreenOperationRef = useRef(0);
+  const fullscreenQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const fullscreenEnterPendingRef = useRef(false);
+  const fullscreenRequestedByComponentRef = useRef(false);
+  const presentationRequestedRef = useRef(false);
+  const nativeFullscreenSeenRef = useRef(false);
   const ownsFullscreenRef = useRef(false);
+  const orientationLockRef = useRef<ReturnType<typeof createProjectionOrientationLock> | null>(null);
+  if (orientationLockRef.current === null) {
+    const orientation = typeof screen === "undefined"
+      ? undefined
+      : screen.orientation as ScreenOrientation & { lock?: (orientation: "portrait" | "landscape") => Promise<void> };
+    orientationLockRef.current = createProjectionOrientationLock(orientation, setOrientationLockState);
+  }
   const presentationMode = immersive || nativeFullscreen;
   const isDrawing = snapshot.phase === "drawing";
   const openSettings = useCallback((event: React.MouseEvent<HTMLButtonElement>): void => {
@@ -673,17 +719,18 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     setSettingsOpen(false);
     window.requestAnimationFrame(() => settingsTriggerRef.current?.focus());
   }, []);
-  const orientationController = (): (ScreenOrientation & { lock?: (orientation: "portrait" | "landscape") => Promise<void> }) | undefined =>
-    screen.orientation as ScreenOrientation & { lock?: (orientation: "portrait" | "landscape") => Promise<void> };
   const releaseOrientation = useCallback((): void => {
-    unlockProjectionOrientation(orientationController());
-    setOrientationLockState("idle");
+    orientationLockRef.current?.release();
   }, []);
-  const lockOrientation = useCallback(async (nextLayout: ProjectionLayout): Promise<void> => {
-    const state = await lockProjectionOrientation(nextLayout, orientationController());
-    setOrientationLockState(state);
+  const lockOrientation = useCallback((nextLayout: ProjectionLayout): Promise<void> =>
+    orientationLockRef.current?.lock(nextLayout) ?? Promise.resolve(), []);
+  const queueFullscreenAction = useCallback((action: () => Promise<void>): Promise<void> => {
+    const request = fullscreenQueueRef.current.catch(() => undefined).then(action);
+    fullscreenQueueRef.current = request.catch(() => undefined);
+    return request;
   }, []);
   const changeLayout = (nextLayout: ProjectionLayout): void => {
+    layoutRef.current = nextLayout;
     setLayout(nextLayout);
     try {
       saveProjectionLayout(window.localStorage, nextLayout);
@@ -692,8 +739,27 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     }
     setOrientationMatches(projectionOrientationMatches(nextLayout, window.innerWidth, window.innerHeight));
     setOrientationLockState("idle");
-    if (presentationMode) void lockOrientation(nextLayout);
+    if (presentationRequestedRef.current || projectionFullscreenActive()) void lockOrientation(nextLayout);
+    else orientationLockRef.current?.cancel();
   };
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      const shouldExitNativeFullscreen = ownsFullscreenRef.current || fullscreenRequestedByComponentRef.current;
+      mountedRef.current = false;
+      presentationRequestedRef.current = false;
+      fullscreenEnterPendingRef.current = false;
+      fullscreenRequestedByComponentRef.current = false;
+      fullscreenOperationRef.current += 1;
+      orientationLockRef.current?.cancel();
+      ownsFullscreenRef.current = false;
+      nativeFullscreenSeenRef.current = false;
+      if (shouldExitNativeFullscreen) {
+        void exitProjectionFullscreen();
+        void queueFullscreenAction(exitProjectionFullscreen);
+      }
+    };
+  }, [queueFullscreenAction]);
   useEffect(() => {
     let wakeLock: WakeLockSentinel | null = null;
     let disposed = false;
@@ -728,17 +794,26 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     };
   }, []);
   useEffect(() => {
-    const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null };
     const syncFullscreen = (): void => {
-      const active = Boolean(document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement);
+      if (!mountedRef.current) return;
+      const active = projectionFullscreenActive();
       setNativeFullscreen(active);
-      if (!active) {
-        ownsFullscreenRef.current = false;
-        setImmersive(false);
-        releaseOrientation();
-      } else {
-        void lockOrientation(layout);
+      if (active) {
+        nativeFullscreenSeenRef.current = true;
+        void lockOrientation(layoutRef.current);
+        return;
       }
+      // Do not turn off the CSS fallback merely because the browser has no
+      // native Fullscreen API. Only a real native fullscreen exit ends it.
+      if (!nativeFullscreenSeenRef.current) return;
+      nativeFullscreenSeenRef.current = false;
+      ownsFullscreenRef.current = false;
+      if (presentationRequestedRef.current && fullscreenEnterPendingRef.current) return;
+      presentationRequestedRef.current = false;
+      fullscreenRequestedByComponentRef.current = false;
+      fullscreenOperationRef.current += 1;
+      setImmersive(false);
+      releaseOrientation();
     };
     document.addEventListener("fullscreenchange", syncFullscreen);
     document.addEventListener("webkitfullscreenchange", syncFullscreen);
@@ -747,14 +822,16 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
       document.removeEventListener("fullscreenchange", syncFullscreen);
       document.removeEventListener("webkitfullscreenchange", syncFullscreen);
     };
-  }, [layout, lockOrientation, releaseOrientation]);
+  }, [lockOrientation, releaseOrientation]);
   useEffect(() => {
     const updateOrientation = (): void => {
-      setOrientationMatches(projectionOrientationMatches(layout, window.innerWidth, window.innerHeight));
+      setOrientationMatches(projectionOrientationMatches(layoutRef.current, window.innerWidth, window.innerHeight));
     };
     const relockWhenVisible = (): void => {
       updateOrientation();
-      if (document.visibilityState === "visible" && presentationMode) void lockOrientation(layout);
+      if (document.visibilityState === "visible" && (presentationRequestedRef.current || projectionFullscreenActive())) {
+        void lockOrientation(layoutRef.current);
+      }
     };
     updateOrientation();
     window.addEventListener("resize", updateOrientation);
@@ -765,7 +842,7 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
       screen.orientation?.removeEventListener?.("change", updateOrientation);
       document.removeEventListener("visibilitychange", relockWhenVisible);
     };
-  }, [layout, lockOrientation, presentationMode]);
+  }, [lockOrientation]);
   useEffect(() => {
     document.documentElement.classList.toggle("projection-immersive", presentationMode);
     return () => document.documentElement.classList.remove("projection-immersive");
@@ -780,42 +857,32 @@ function ProjectionScreen({ snapshot, connected, connectionMessage, reconnectLab
     return () => window.clearTimeout(timer);
   }, [drawingControlsVisible, isDrawing]);
   const enterFullscreen = async (): Promise<void> => {
-    // iOS Safari may not expose the Fullscreen API for documents. The CSS mode
-    // still removes app chrome and uses the entire visible viewport in that case.
+    const operation = ++fullscreenOperationRef.current;
+    presentationRequestedRef.current = true;
+    fullscreenEnterPendingRef.current = true;
+    fullscreenRequestedByComponentRef.current = true;
     setImmersive(true);
-    const fullscreenElement = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> };
-    const requestFullscreen = fullscreenElement.requestFullscreen?.bind(fullscreenElement) ?? fullscreenElement.webkitRequestFullscreen?.bind(fullscreenElement);
-    try {
-      await requestFullscreen?.();
-      ownsFullscreenRef.current = Boolean(document.fullscreenElement ?? (document as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement);
-    } catch {
-      // Keep the CSS presentation fallback active.
-    }
-    await lockOrientation(layout);
+    await queueFullscreenAction(async () => {
+      if (!mountedRef.current || operation !== fullscreenOperationRef.current || !presentationRequestedRef.current) return;
+      const active = await requestProjectionFullscreen();
+      if (!mountedRef.current || operation !== fullscreenOperationRef.current || !presentationRequestedRef.current) return;
+      ownsFullscreenRef.current = active;
+      fullscreenEnterPendingRef.current = false;
+      void lockOrientation(layoutRef.current);
+    });
   };
   const exitFullscreen = async (): Promise<void> => {
+    const operation = ++fullscreenOperationRef.current;
+    presentationRequestedRef.current = false;
+    fullscreenEnterPendingRef.current = false;
+    fullscreenRequestedByComponentRef.current = false;
     setImmersive(false);
     releaseOrientation();
-    const fullscreenDocument = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> };
-    const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
-    try {
-      await exit?.();
-    } catch {
-      // The fallback only changes local presentation styles.
-    }
-    ownsFullscreenRef.current = false;
+    await queueFullscreenAction(async () => {
+      await exitProjectionFullscreen();
+      if (operation === fullscreenOperationRef.current) ownsFullscreenRef.current = false;
+    });
   };
-  useEffect(() => () => {
-    unlockProjectionOrientation(orientationController());
-    if (!ownsFullscreenRef.current) return;
-    const fullscreenDocument = document as Document & { webkitExitFullscreen?: () => Promise<void> };
-    const exit = document.exitFullscreen?.bind(document) ?? fullscreenDocument.webkitExitFullscreen?.bind(fullscreenDocument);
-    try {
-      void exit?.();
-    } catch {
-      // The document may already be leaving fullscreen during unmount.
-    }
-  }, []);
   // In a V support, each half of the display reflects into a lateral face.
   // The views therefore point away from the shared ridge (left: 90°, right: 270°).
   const copies = PROJECTION_LAYOUTS[layout].copies;
